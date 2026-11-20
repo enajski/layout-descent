@@ -50,14 +50,15 @@
 (defn arg-samples
   "Argument vectors for one pattern: one key per :key level, in level order. A share :miss of them
   miss: half through a key that the level never holds, half through a key drawn from the whole
-  level. With :boxed-ints every second sample passes its :long keys as Integer."
-  [plan pattern data {:keys [n seed miss boxed-ints] :or {n 64 seed 1 miss 0.25}}]
+  level. With :boxed-ints every second sample passes its :long keys as Integer.
+   Supply :key-paths to share precomputed paths across patterns."
+  [plan pattern data {:keys [n seed miss boxed-ints key-paths] :or {n 64 seed 1 miss 0.25}}]
   (let [types (mapv :type (:levels plan))
         fanout (:fanout (:workload plan))
         bound (filterv #(= :key (nth (:bind pattern) %)) (range (count types)))
-        all (paths data (count types))
+        all (when (seq bound) (or key-paths (paths data (count types))))
         r (Random. (long seed))
-        absent (fn [level] (level-key (nth types level) (+ 1000 (long (nth fanout level)))))
+        absent (fn [level] (level-key (nth types level) -1))
         any (fn [level] (level-key (nth types level) (.nextInt r (int (nth fanout level)))))
         sample (fn [i]
                  (let [roll (.nextDouble r)

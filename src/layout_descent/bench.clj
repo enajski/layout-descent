@@ -142,38 +142,46 @@
      :build-ms (:build-ms prepared)
      :patterns rows}))
 
+(def ^:private candidate-batch-size 4)
+
+(defn- measure-batch [plans data samples opts entries seed]
+  (let [prepared (mapv #(prepare % data samples) plans)
+        _ (System/gc)
+        warmed (mapv (fn [p] (update p :cases (fn [cases] (mapv #(warm % opts) cases)))) prepared)
+        times (reduce (fn [acc [p case]]
+                        (update acc [(:hash p) (:id case)] (fnil conj []) (sample case)))
+                      {}
+                      (for [_ (range (:rounds opts)) p warmed case (:cases p)] [p case]))]
+    (mapv (fn [plan p] (assoc (summarize plan p times) :entries entries :seed seed))
+          plans warmed)))
+
 (defn measure
-  "Time normal plans of one task. Returns one summary per plan, in the given order: :cost is the
-  weighted mean ns per call plus the memory charge, :noise the weighted spread of the samples.
-  opts overrides `defaults`; :seed-offset moves the data and the arguments to a holdout seed."
+  "Time normal plans of one task. All layouts use the first plan's objective. Each candidate is
+   measured alongside the baseline in its own batch. Returns summaries in input order; a candidate
+   summary carries the baseline of its batch as :batch-baseline."
   [plans opts]
   (let [opts (merge defaults opts)
-        first-plan (first plans)]
+        base (first plans)]
     (when-not (apply = (map plan/task-key plans))
       (throw (ex-info "The plans do not share one task, so their costs do not compare."
                       {:code :task-mismatch :tasks (mapv plan/task-hash plans)})))
-    (let [seed (+ (long (:seed (:workload first-plan))) (long (:seed-offset opts 0)))
-          data (gen/data first-plan {:seed seed})
+    (let [seed (unchecked-add (long (get-in base [:workload :seed])) (long (:seed-offset opts 0)))
+          data (gen/data base {:seed seed})
+          key-paths (gen/paths data (count (:levels base)))
+          entries (count key-paths)
           samples (into {}
                         (map (fn [pattern]
                                [(:id pattern)
-                                (gen/arg-samples first-plan pattern data
-                                                 {:n (:args opts) :seed (+ seed 101) :miss (:miss opts)})]))
-                        (:patterns first-plan))
-          prepared (mapv #(prepare % data samples) plans)
-          _ (System/gc)
-          warmed (mapv (fn [p] (update p :cases (fn [cases] (mapv #(warm % opts) cases)))) prepared)
-          times (reduce (fn [acc [p case]]
-                          (update acc [(:hash p) (:id case)] (fnil conj []) (sample case)))
-                        {}
-                        (for [_ (range (:rounds opts))
-                              p warmed
-                              case (:cases p)]
-                          [p case]))]
-      (mapv (fn [plan p] (assoc (summarize plan p times)
-                                :entries (count (gen/paths data (count (:levels plan))))
-                                :seed seed))
-            plans warmed))))
+                                (gen/arg-samples base pattern data
+                                                 {:n (:args opts) :seed (unchecked-add seed 101)
+                                                  :miss (:miss opts) :key-paths key-paths})]))
+                        (:patterns base))
+          batches (or (seq (partition-all candidate-batch-size (rest plans))) [[]])]
+      (reduce (fn [out candidates]
+                (let [[b & cs] (measure-batch (into [base] (map #(assoc % :objective (:objective base))) candidates)
+                                              data samples opts entries seed)]
+                  (into (if (seq out) out [b]) (map #(assoc % :batch-baseline b)) cs)))
+              [] batches))))
 
 (defn verdict
   "Compare a candidate summary with a baseline summary. :better and :worse need a difference of

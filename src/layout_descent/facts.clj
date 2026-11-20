@@ -14,9 +14,9 @@
     contains? {:map 0 :key 1 :kind :read}
     assoc-in  {:map 0 :path 1 :kind :write}
     update-in {:map 0 :path 1 :kind :write}
-    assoc     {:map 0 :key 1 :kind :write}
+    assoc     {:map 0 :key 1 :key-step 2 :kind :write}
     update    {:map 0 :key 1 :kind :write}
-    dissoc    {:map 0 :key 1 :kind :write}
+    dissoc    {:map 0 :key 1 :key-step 1 :kind :write}
     keys      {:map 0 :kind :scan}
     vals      {:map 0 :kind :scan}
     reduce-kv {:map 2 :kind :scan}})
@@ -35,24 +35,31 @@
   (let [s (pr-str form)]
     (if (> (count s) 60) (str (subs s 0 60) "…") s)))
 
+(def ^:private thread-first '#{-> some-> cond->})
+(def ^:private thread-last '#{->> some->> cond->>})
+
+(defn- position [form]
+  (when-let [{:keys [row col]} (meta form)]
+    (when row [row col])))
+
 (defn- index-forms
-  "Two maps over every form of a file: [row col] of a list -> the list, and [row col] of a symbol
-  that is not the head of its list -> [list index]."
+  "Map each list position to its form, and each direct argument position to its parent and slot."
   [forms]
   (let [calls (volatile! {})
-        values (volatile! {})]
+        arguments (volatile! {})]
     (letfn [(visit [form]
               (when (seq? form)
-                (when-let [{:keys [row col]} (meta form)]
-                  (vswap! calls assoc [row col] form))
-                (doseq [[i child] (map-indexed vector form)
-                        :when (and (pos? (long i)) (symbol? child) (meta child))]
-                  (vswap! values assoc [(:row (meta child)) (:col (meta child))] [form i])))
+                (when-let [pos (position form)]
+                  (vswap! calls assoc pos form))
+                (doseq [[i child] (map-indexed vector (rest form))
+                        :let [pos (position child)]
+                        :when pos]
+                  (vswap! arguments assoc pos [form (inc (long i))])))
               (cond
                 (map? form) (run! visit (mapcat identity form))
                 (coll? form) (run! visit form)))]
       (run! visit forms))
-    {:calls @calls :values @values}))
+    {:calls @calls :arguments @arguments}))
 
 (defn- element [form]
   (cond
@@ -63,63 +70,72 @@
 
 (defn- chain
   "Follow nested literal accesses outwards: (get (get-in db [:a k]) j) is db at [:a ?k ?j].
-  Returns {:root form :path [elements] :inner [positions of the absorbed calls]}, with a nil
-  :path when a path is not a literal vector."
-  [form]
-  (let [here (fn [inner own]
-               (let [below (chain inner)]
-                 (if (and (:path below) own)
-                   (assoc below
-                          :path (into (:path below) own)
-                          :inner (conj (:inner below) ((juxt :row :col) (meta form))))
-                   {:root form :path [] :inner []})))]
+  Returns {:root form :path [elements] :inner [positions of the absorbed calls]}."
+  [resolved form]
+  (let [pos (position form)
+        accessor (when (seq? form) (resolved pos))
+        here (fn [own]
+               (let [below (chain resolved (second form))]
+                 (assoc below
+                        :path (into (:path below) own)
+                        :inner (conj (:inner below) pos))))]
     (cond
-      (and (seq? form) (= 'get-in (first form)) (vector? (nth form 2 nil)))
-      (here (second form) (mapv element (nth form 2)))
+      (and (= 'get-in accessor) (vector? (nth form 2 nil)))
+      (here (mapv element (nth form 2)))
 
-      (and (seq? form) (= 'get (first form)) (<= 3 (count form) 4))
-      (here (second form) [(element (nth form 2))])
+      (and (= 'get accessor) (<= 3 (count form) 4))
+      (here [(element (nth form 2))])
 
       (and (seq? form) (keyword? (first form)) (= 2 (count form)))
-      (here (second form) [(element (first form))])
+      (here [(element (first form))])
 
       :else {:root form :path [] :inner []})))
 
-(defn- site
-  "One fact from the arguments of an accessor call. threaded? says that the map argument is
-  supplied by a threading macro and is not in args."
-  [fn-name args threaded?]
-  (let [{:keys [path key kind] map-index :map} (get accessors fn-name)
-        arg (fn [i] (if threaded? (when (pos? (long i)) (nth args (dec (long i)) nil)) (nth args i nil)))
-        below (if threaded? {:root '<threaded> :path [] :inner []} (chain (arg map-index)))
-        own (cond
-              path (let [form (arg path)] (when (vector? form) (mapv element form)))
-              key [(element (arg key))]
-              :else [{:kind :scan :text "*"}])]
-    {:kind kind
-     :target (clip (:root below))
-     :inner (:inner below)
-     :path (when own (mapv :text (into (:path below) own)))
-     :shape (when own (mapv #(if (= :key (:kind %)) "?" (:text %)) (into (:path below) own)))
-     :keyed (count (filter #(= :key (:kind %)) (into (:path below) own)))}))
+(defn- call-sites [resolved fn-name args]
+  (let [{:keys [path key key-step kind] map-index :map} (accessors fn-name)
+        arg #(nth args % nil)
+        below (chain resolved (arg map-index))
+        paths (cond
+                path [(let [form (arg path)] (when (vector? form) (mapv element form)))]
+                key-step (map (comp vector element) (take-nth key-step (drop key args)))
+                key [[(element (arg key))]]
+                :else [[{:kind :scan :text "*"}]])]
+    (for [own paths
+          :let [full (into (:path below) own)]]
+      {:kind kind
+       :target (clip (:root below))
+       :inner (:inner below)
+       :path (when own (mapv :text full))
+       :shape (when own (mapv #(if (= :key (:kind %)) "?" (:text %)) full))
+       :keyed (count (filter #(= :key (:kind %)) full))})))
 
-(defn- usage-site [{:keys [calls values]} {:keys [row col arity name]}]
-  (if-let [form (get calls [row col])]
-    (let [args (vec (rest form))]
-      (site name args (and arity (< (count args) (long arity)))))
-    (when-let [[parent i] (get values [row col])]
-      (when (appliers (first parent))
-        (assoc (site name (into ['<reference>] (drop (inc (long i)) parent)) false)
-               :target (clip (nth parent 1 nil))
-               :via (str (first parent)))))))
+(defn- usage-sites [{:keys [calls arguments]} resolved {:keys [row col arity name]}]
+  (let [pos [row col]
+        [parent i] (arguments pos)
+        parent-name (resolved (position parent))
+        step? (and i (<= 2 (long i)))]
+    (if-let [form (calls pos)]
+      (let [args (vec (rest form))]
+        (call-sites resolved name
+                    (cond
+                      (or (nil? arity) (<= (long arity) (count args))) args
+                      (and step? (thread-last parent-name)) (conj args '<threaded>)
+                      :else (into ['<threaded>] args))))
+      (cond
+        (and step? (= 1 arity) (or (thread-first parent-name) (thread-last parent-name)))
+        (call-sites resolved name ['<threaded>])
+
+        (appliers (first parent))
+        (for [site (call-sites resolved name (into ['<reference>] (drop (inc (long i)) parent)))]
+          (assoc site :target (clip (nth parent 1 nil)) :via (str (first parent))))))))
 
 (defn- file-index [filename]
   (try
     (index-forms (edamame/parse-string-all (slurp filename) parse-opts))
     (catch Exception _ nil)))
 
-(defn- relevant? [{:keys [shape keyed]}]
-  (or (nil? shape) (pos? (long keyed)) (>= (count shape) 2)))
+(defn- relevant? [{:keys [kind shape keyed]}]
+  (or (= :scan kind) (nil? shape) (pos? (long keyed)) (>= (count shape) 2)))
 
 (defn analyze
   "Every access fact under the given source paths. Returns {:files n :unparsed [files] :sites
@@ -132,7 +148,9 @@
                                  :config {:output {:analysis true}}})
                     :analysis
                     :var-usages
-                    (filter #(and ('#{clojure.core cljs.core} (:to %)) (accessors (:name %))))
+                    (filter (fn [{:keys [to name]}]
+                              (and ('#{clojure.core cljs.core} to)
+                                   (or (accessors name) (thread-first name) (thread-last name)))))
                     ;; A call inside swap! is reported two times, a .cljc file once per language.
                     (sort-by (juxt :filename :row :col #(if (:arity %) 0 1)))
                     (reduce (fn [[seen out] u]
@@ -140,11 +158,16 @@
                                 (if (seen k) [seen out] [(conj seen k) (conj out u)])))
                             [#{} []])
                     second)
-        indexes (into {} (map (fn [f] [f (file-index f)])) (distinct (map :filename usages)))
-        sites (for [u usages
-                    :let [index (get indexes (:filename u))
-                          fact (when index (usage-site index u))]
-                    :when fact]
+        resolved (reduce (fn [out {:keys [filename row col name]}]
+                           (assoc-in out [filename [row col]] name))
+                         {} usages)
+        access-usages (filter #(accessors (:name %)) usages)
+        indexes (into {} (map (fn [f] [f (file-index f)])) (distinct (map :filename access-usages)))
+        sites (for [u access-usages
+                    :let [filename (:filename u)
+                          index (get indexes filename)]
+                    :when index
+                    fact (usage-sites index (resolved filename) u)]
                 (array-map
                  :file (:filename u)
                  :row (:row u)

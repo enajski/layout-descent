@@ -213,9 +213,11 @@ class Descent:
     def verify(
         self,
         plan: PlanPath,
-        source: Annotated[str | None, "An emitted source file to check in place of fresh output"] = None,
+        source: Annotated[str | None, "A trusted Clojure file to execute and check in place of fresh output"] = None,
     ) -> dict[str, Any]:
         """Compile the code of a plan and compare every pattern with the reference model.
+
+        Passing `source` executes that file. Use only trusted code.
 
         `ok` is false, with `gate.mismatches`, when the code disagrees with the model or compiles
         with a warning.
@@ -230,7 +232,7 @@ class Descent:
     ) -> dict[str, Any]:
         """List every plan one decision away, with its move and the reason for it.
 
-        With `out_dir`, each neighbor is written as `<hash>.edn` and its `path` is returned. The
+        With `out_dir`, each neighbor is written as `<task-hash>/<layout-hash>.edn` and its `path` is returned. The
         neighbors are a starting set: any valid plan of the same task can be a candidate.
         """
         return run_cli("neighbors", _path(plan), *_flags(out_dir=_path(out_dir) if out_dir else None))
@@ -283,7 +285,8 @@ class Descent:
         """Move the layout decisions of a candidate into the plan and emit the plan's source file.
 
         Refused with `not_measured` unless the journal holds a `better` verdict for these two
-        plans. The gate runs again before anything is written. Running it again changes nothing.
+        plans under the current objective. The gate runs again before anything is written. A retry
+        finishes interrupted publication before starting another acceptance.
         """
         return run_cli("accept", _path(candidate), "--into", _path(into), *_flags(force=force))
 
@@ -291,11 +294,11 @@ class Descent:
     def emit(
         self,
         plan: PlanPath,
-        out: Annotated[str | None, "File to write; the default is :emit :path of the plan"] = None,
+        out: Annotated[str | None, "Optional preview file to write; must not be the configured :emit :path"] = None,
     ) -> dict[str, Any]:
         """Gate a plan, then write the Clojure namespace that implements it.
 
-        With no `out` and no :emit in the plan, the source is returned as `source`.
+        With no `out`, the source is returned as `source`. Only `accept` writes the configured path.
         """
         return run_cli("emit", _path(plan), *_flags(out=_path(out) if out else None))
 

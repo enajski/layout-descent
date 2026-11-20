@@ -11,7 +11,9 @@
             [layout-descent.gate :as gate]
             [layout-descent.plan :as plan])
   (:import (java.io File)
-           (java.util LinkedHashMap)))
+           (java.nio.channels FileChannel)
+           (java.nio.file Files LinkOption OpenOption Path StandardOpenOption)
+           (java.util LinkedHashMap UUID)))
 
 (def commands
   "Every command: its usage, what it changes, and what it is for."
@@ -23,8 +25,8 @@
     :doc "Validate a plan file. Gives its hash, task and warnings, or its problems."}
    {:name "status" :usage "status <plan>" :writes "nothing"
     :doc "The plan in full: which order serves each pattern, the emitted functions, the journal."}
-   {:name "verify" :usage "verify <plan> [--source <file>]" :writes "nothing"
-    :doc "Run the gate: compile the emitted code and compare every pattern with the model."}
+   {:name "verify" :usage "verify <plan> [--source <trusted-clojure-file>]" :writes "nothing"
+    :doc "Run the gate. --source executes the supplied Clojure file; use only trusted code."}
    {:name "neighbors" :usage "neighbors <plan> [--out-dir <dir>]" :writes "candidate files in --out-dir"
     :doc "Every plan one decision away. A starting set of candidates; any valid plan of the task may be one."}
    {:name "evaluate" :usage "evaluate <candidate> --against <plan> [--rounds N] [--warm-ms N]"
@@ -36,8 +38,8 @@
    {:name "accept" :usage "accept <candidate> --into <plan> [--force <reason>]"
     :writes "<plan>, its emitted file, one line in <plan>.journal"
     :doc "Move the orders of a candidate into the plan. Needs a better verdict in the journal."}
-   {:name "emit" :usage "emit <plan> [--out <file>]" :writes "the emitted source file"
-    :doc "Gate the plan, then write its source to --out or to :emit :path. With neither, return it."}])
+   {:name "emit" :usage "emit <plan> [--out <file>]" :writes "an optional preview file"
+    :doc "Gate and return source, or write a preview to --out. Only accept writes the configured emitted file."}])
 
 (def ^:private flags-of
   {"help" #{} "facts" #{:limit} "check" #{} "status" #{} "verify" #{:source} "neighbors" #{:out-dir}
@@ -52,8 +54,9 @@
    :same-plan "The candidate makes the same layout decisions as the plan. Change :orders or :serve."
    :gate-failed "The emitted code is wrong or compiles with warnings. Do not accept this plan. For source that layout-descent emitted, this is a defect of layout-descent: report `mismatches`."
    :not-measured "Run `evaluate <candidate> --against <plan>` first. accept needs a `better` verdict for these two hashes on this task."
-   :no-target "Give --out <file>, or add :emit {:ns some.ns :path \"src/some/ns.clj\"} to the plan."
-   :internal "An unexpected error. Read `message`; the command changed nothing that it did not report."})
+   :path-collision "Choose separate files for the plan, generated source, journal and candidate."
+   :accept-incomplete "Fix the reported write problem and rerun accept to resume."
+   :internal "An unexpected error. Read `message` for the cause."})
 
 (defn- fail
   "Stop the command with an error code. extra is merged into the top level of the answer."
@@ -105,10 +108,43 @@
   (let [f (io/file path)]
     (absolute (if (.isAbsolute f) f (io/file (.getParentFile (io/file (absolute plan-path))) path)))))
 
-;; ---- journal --------------------------------------------------------------
+;; ---- files and journal -----------------------------------------------------
 
-(defn- journal-path [plan-path]
-  (str (absolute plan-path) ".journal"))
+(defn- canonical [path]
+  (.getCanonicalPath (io/file path)))
+
+(defn- journal-path [plan-path] (str (canonical plan-path) ".journal"))
+(defn- lock-path [plan-path] (str (canonical plan-path) ".lock"))
+(defn- pending-path [plan-path] (str (canonical plan-path) ".accept-pending"))
+
+(def ^:private local-locks (vec (repeatedly 64 #(Object.))))
+
+(defn- with-plan-lock [path f]
+  (let [path (canonical path)
+        lock-file (lock-path path)]
+    (locking (nth local-locks (mod (hash path) (count local-locks)))
+      (with-open [channel (FileChannel/open (Path/of lock-file (make-array String 0))
+                                          (into-array OpenOption [StandardOpenOption/CREATE StandardOpenOption/WRITE]))
+                  lock (.lock channel)]
+        (f path)))))
+
+(defn- same-file? [a b]
+  (and a b
+       (or (= (canonical a) (canonical b))
+           (let [a (.toPath (io/file a)) b (.toPath (io/file b))]
+             (and (Files/exists a (make-array LinkOption 0))
+                  (Files/exists b (make-array LinkOption 0))
+                  (Files/isSameFile a b))))))
+
+(defn- separate! [out protected]
+  (when (and out (some #(same-file? out %) protected))
+    (fail :path-collision (str "Output file aliases a protected file: " out))))
+
+(defn- plan-files [path]
+  [path (journal-path path) (lock-path path) (pending-path path)])
+
+(defn- candidate-file [root plan]
+  (io/file root (plan/task-hash plan) (str (plan/plan-hash plan) ".edn")))
 
 (defn- journal
   "The records of a plan's journal. A line that does not read, such as a torn last line, is skipped."
@@ -163,17 +199,18 @@
      :candidate (brief c))))
 
 (defn- journal-evaluation! [plan-path base candidate result opts]
-  (append-journal! plan-path
+  (with-plan-lock plan-path #(append-journal! %
                    {:op :evaluate
                     :baseline (plan/plan-hash base)
                     :candidate (plan/plan-hash candidate)
                     :task (plan/task-hash base)
+                    :objective (:objective base)
                     :verdict (:verdict result)
                     :gain (:gain result)
                     :baseline-cost (:cost (:baseline result))
                     :candidate-cost (:cost (:candidate result))
                     :holdout (:verdict (:holdout result))
-                    :rounds (:rounds opts)}))
+                    :rounds (:rounds opts)})))
 
 (defn- same-task! [base candidate]
   (when-not (= (plan/task-key base) (plan/task-key candidate))
@@ -263,6 +300,7 @@
      :objective (:objective plan)
      :emitted {:path target :ns (emit/ns-symbol plan) :state (emit-state plan target)}
      :journal {:path (journal-path path)
+               :accept-pending (.exists (io/file (pending-path path)))
                :records (count records)
                :last (vec (take-last 5 records))})))
 
@@ -287,8 +325,9 @@
                                  :move move
                                  :why why
                                  :warnings (mapv :code (plan/warnings candidate))}
-                          dir (assoc :path (plan/write-text! (io/file dir (str hash ".edn"))
-                                                             (plan/render candidate)))))
+                          dir (assoc :path (let [out (candidate-file dir candidate)]
+                                             (separate! out (conj (plan-files path) (emit-target path plan nil)))
+                                             (plan/write-text! out (plan/render candidate))))))
                       (plan/neighbors plan))}))
 
 (defmethod command "evaluate" [_ {:keys [flags] :as args}]
@@ -297,6 +336,8 @@
         base (plan/read-plan base-path)
         candidate (plan/read-plan candidate-path)
         opts (bench-opts flags)]
+    (separate! (journal-path base-path)
+               [base-path candidate-path (emit-target base-path base nil)])
     (same-task! base candidate)
     (when (= (plan/plan-hash base) (plan/plan-hash candidate))
       (fail :same-plan "The candidate equals the plan."))
@@ -332,7 +373,7 @@
   (let [candidates (step-candidates current)
         timed (filterv :gate-ok candidates)
         [base & summaries] (when (seq timed) (bench/measure (into [current] (map :plan timed)) opts))
-        scored (mapv (fn [c s] (assoc c :cost (:cost s) :verdict (:verdict (bench/verdict (:objective current) base s))))
+        scored (mapv (fn [c s] (assoc c :cost (:cost s) :verdict (:verdict (bench/verdict (:objective current) (or (:batch-baseline s) base) s))))
                      timed summaries)
         best (first (sort-by :cost (filter #(= :better (:verdict %)) scored)))
         confirmed (when best (compare-plans current (:plan best) opts))]
@@ -359,6 +400,8 @@
         start (plan/read-plan path)
         max-steps (int-flag flags :max-steps 4 1)
         opts (bench-opts flags)]
+    (separate! (:out flags) (conj (plan-files path) (emit-target path start nil)))
+    (separate! (journal-path path) [path (emit-target path start nil)])
     (gate! start "plan")
     (let [[final steps]
           (loop [current start
@@ -381,9 +424,10 @@
                         overall (:verdict overall)
                         :else :better)
           out (when improved?
-                (plan/write-text! (or (some-> (:out flags) absolute)
-                                      (beside path (str "candidates/" (plan/plan-hash final) ".edn")))
-                                  (plan/render final)))]
+                (let [out (or (some-> (:out flags) absolute)
+                              (candidate-file (beside path "candidates") final))]
+                  (separate! out (conj (plan-files path) (emit-target path start nil)))
+                  (plan/write-text! out (plan/render final))))]
       (array-map
        :start (plan/plan-hash start)
        :final (plan/plan-hash final)
@@ -397,51 +441,92 @@
                (str "accept " out " --into " path)
                "Keep the plan. A hand-written candidate may still be better: neighbors are one decision away only.")))))
 
+(defn- latest-measurement [records target from to]
+  (last (filter #(and (= :evaluate (:op %))
+                      (= from (:baseline %)) (= to (:candidate %))
+                      (= (plan/task-hash target) (:task %))
+                      (= (:objective target) (:objective %)))
+                records)))
+
+(defn- acceptance-writes [path {:keys [accepted changed? source? record]}]
+  (let [out (emit-target path accepted nil)
+        records (when record (journal path))]
+    (separate! out (plan-files path))
+    (cond-> []
+      source? (conj [out (emit/source accepted)])
+      changed? (conj [path (plan/render accepted)])
+      (and record (not-any? #(= (:transaction record) (:transaction %)) records))
+      (conj [(journal-path path)
+             (let [file (io/file (journal-path path))
+                   old (when (.exists file) (slurp file))]
+               (str old (when (and (seq old) (not (str/ends-with? old "\n"))) "\n")
+                    (pr-str record) "\n"))]))))
+
+(defn- publish-acceptance! [path transaction resume?]
+  (let [pending (pending-path path)
+        staged (volatile! [])]
+    (try
+      (doseq [[dest text] (acceptance-writes path transaction)]
+        (when (.isDirectory (io/file dest))
+          (throw (java.io.IOException. (str "Destination is a directory: " dest))))
+        (vswap! staged conj [(plan/stage-text! dest text) dest]))
+      (when-not resume? (plan/write-text! pending (pr-str transaction)))
+      (doseq [[tmp dest] @staged] (plan/publish-text! tmp dest))
+      (Files/deleteIfExists (.toPath (io/file pending)))
+      (catch Exception e
+        (if (.exists (io/file pending))
+          (fail :accept-incomplete (str "Acceptance is pending: " (ex-message e)) {:pending pending})
+          (throw e)))
+      (finally
+        (doseq [[tmp _] @staged] (Files/deleteIfExists tmp))))))
+
 (defmethod command "accept" [_ {:keys [flags] :as args}]
   (let [candidate-path (one-path "accept" args)
-        into-path (or (:into flags) (fail :usage "accept needs --into <plan>."))
-        target (plan/read-plan into-path)
-        candidate (plan/read-plan candidate-path)
-        _ (same-task! target candidate)
-        from (plan/plan-hash target)
-        to (plan/plan-hash candidate)
-        ;; Only the layout decisions move. The name, workload, objective and :emit stay the plan's.
-        accepted (assoc target :orders (:orders candidate) :serve (:serve candidate))
-        changed? (not= from to)
-        records (journal into-path)
-        evidence (last (filter #(and (= :evaluate (:op %)) (= :better (:verdict %))
-                                     (= to (:candidate %)) (= (plan/task-hash target) (:task %))
-                                     (or (not changed?) (= from (:baseline %))))
-                               records))]
-    (when (and changed? (nil? evidence) (nil? (:force flags)))
-      (fail :not-measured (str "No better verdict for candidate " to " against plan " from " is in the journal.")
-            {:journal (journal-path into-path)}))
-    (let [emit-path (emit-target into-path accepted nil)
-          stale? (and emit-path (not= :current (emit-state accepted emit-path)))]
-      (when (or changed? stale?)
-        (gate! accepted "candidate"))
-      (when changed?
-        (plan/write-text! into-path (plan/render accepted)))
-      (when stale?
-        (plan/write-text! emit-path (emit/source accepted)))
-      ;; A run that was interrupted after the plan was written finds no record here and adds it.
-      (when (and (or changed? evidence)
-                 (not= to (:to (last (filter #(= :accept (:op %)) records)))))
-        (append-journal! into-path (cond-> {:op :accept :from (if changed? from (:baseline evidence)) :to to}
-                                     (:force flags) (assoc :forced (:force flags))
-                                     evidence (assoc :gain (:gain evidence)))))
-      {:plan (absolute into-path)
-       :changed changed?
-       :from from
-       :hash to
-       :forced (boolean (and changed? (nil? evidence)))
-       :emitted (when emit-path {:path emit-path :written (boolean stale?)})
-       :journal (journal-path into-path)})))
+        into-path (or (:into flags) (fail :usage "accept needs --into <plan>."))]
+    (with-plan-lock
+      into-path
+      (fn [path]
+        (let [pending (io/file (pending-path path))
+              recovered? (.exists pending)
+              previous (when recovered? (edn/read-string (slurp pending)))
+              _ (when previous (publish-acceptance! path previous true))
+              candidate (plan/read-plan candidate-path)
+              target (plan/read-plan path)
+              _ (same-task! target candidate)
+              from (plan/plan-hash target)
+              to (plan/plan-hash candidate)
+              changed? (not= from to)
+              accepted (assoc target :orders (:orders candidate) :serve (:serve candidate))
+              out (emit-target path accepted nil)
+              _ (separate! out (conj (plan-files path) candidate-path))
+              _ (doseq [p (rest (plan-files path))] (separate! p [path candidate-path]))
+              source? (boolean (and out (not= :current (emit-state accepted out))))
+              evidence (when changed? (latest-measurement (journal path) target from to))
+              forced? (and changed? (not= :better (:verdict evidence)) (some? (:force flags)))]
+          (when (and changed? (not= :better (:verdict evidence)) (not forced?))
+            (fail :not-measured (str "No current better verdict for candidate " to " against plan " from ".")
+                  {:journal (journal-path path)}))
+          (when (or changed? source?)
+            (gate! accepted "candidate")
+            (publish-acceptance!
+             path {:accepted accepted :changed? changed? :source? source?
+                   :record (when changed?
+                             (cond-> {:op :accept :from from :to to
+                                      :at (str (java.time.Instant/now))
+                                      :transaction (str (UUID/randomUUID))}
+                               forced? (assoc :forced (:force flags))
+                               (= :better (:verdict evidence)) (assoc :gain (:gain evidence))))}
+             false))
+          {:plan path :changed changed? :from from :hash to :forced (boolean forced?)
+           :recovered recovered?
+           :emitted (when out {:path out :written (or source? (boolean (:source? previous)))})
+           :journal (journal-path path)})))))
 
 (defmethod command "emit" [_ {:keys [flags] :as args}]
   (let [path (one-path "emit" args)
         plan (plan/read-plan path)
-        target (emit-target path plan (:out flags))
+        target (some-> (:out flags) absolute)
+        _ (separate! target (conj (plan-files path) (emit-target path plan nil)))
         text (emit/source plan)
         gate (gate! plan "plan")
         base {:hash (plan/plan-hash plan)

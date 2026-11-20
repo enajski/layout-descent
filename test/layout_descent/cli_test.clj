@@ -126,3 +126,85 @@
     (is (= 0 (get answer "exit")))
     (is (= [":scores" "?" "?" ":risk"] (get-in answer ["shapes" 0 "shape"])))
     (is (= 2 (get (run "facts" "no/such/dir") "exit")))))
+
+(deftest acceptance-writes-and-recovery
+  (let [dir (temp-dir)
+        base (io/file dir "plan.edn")
+        candidate (io/file dir "candidate.edn")
+        blocked (io/file dir "blocked")
+        out (io/file blocked "layout.clj")
+        input (assoc fx/small-risk :emit '{:ns demo.layout :path "blocked/layout.clj"})
+        better (fx/with-order input [2 0 1] :csf [:feature-total])
+        accept #(run "accept" candidate "--into" base "--force" "keep this reason")
+        pending (io/file (str base ".accept-pending"))
+        journal (io/file (str base ".journal"))]
+    (spit base (plan/render input))
+    (spit candidate (plan/render better))
+    (spit blocked "not a directory")
+    (is (= 2 (get (accept) "exit")))
+    (is (= (plan/render input) (slurp base)))
+    (is (not (.exists pending)))
+    (is (not (.exists journal)))
+    (is (.delete blocked))
+    (let [publish! plan/publish-text!]
+      (with-redefs [plan/publish-text! (fn [tmp dest]
+                                       (if (= (.getCanonicalPath base) (str dest))
+                                         (throw (java.io.IOException. "interrupted before plan publication"))
+                                         (publish! tmp dest)))]
+        (is (= "accept_incomplete" (get-in (accept) ["error" "code"])))))
+    (is (= (plan/render input) (slurp base)))
+    (is (.exists out))
+    (is (.exists pending))
+    (is (true? (get (run "accept" candidate "--into" base) "recovered")))
+    (is (= (plan/render better) (slurp base)))
+    (is (not (.exists pending)))
+    (is (= ["keep this reason"] (mapv #(get % "forced") (get-in (run "status" base) ["journal" "last"]))))))
+
+(deftest acceptance-needs-the-latest-verdict-for-the-current-objective
+  (let [dir (temp-dir)
+        base (io/file dir "plan.edn")
+        candidate (io/file dir "candidate.edn")
+        journal (io/file (str base ".journal"))
+        input (fx/normal fx/small-risk)
+        next-plan (fx/with-order input [2 0 1] :csf [:feature-total])
+        common {:op :evaluate :baseline (plan/plan-hash input) :candidate (plan/plan-hash next-plan)
+                :task (plan/task-hash input)}
+        accept #(run "accept" candidate "--into" base)]
+    (spit base (plan/render input))
+    (spit candidate (plan/render next-plan))
+    (doseq [rows [[(assoc common :verdict :better)]
+                  [(assoc common :verdict :better :objective {:ns-per-byte 0.0 :min-gain 0.1})]
+                  (mapv #(assoc common :objective (:objective input) :verdict %) [:better :worse])]]
+      (spit journal (str/join "\n" (map pr-str rows)))
+      (is (= "not_measured" (get-in (accept) ["error" "code"]))))
+    (spit journal (str (pr-str (assoc common :objective (:objective input) :verdict :better)) "\n"))
+    (is (true? (get (accept) "changed")))))
+
+(deftest outputs-cannot-replace-protected-files
+  (let [dir (temp-dir)
+        base (io/file dir "plan.edn")
+        alias (io/file dir "alias.edn")
+        candidate (io/file dir "candidate.edn")
+        input (assoc fx/small-risk :emit '{:ns demo.layout :path "./plan.edn"})]
+    (spit base (plan/render input))
+    (spit candidate (plan/render (fx/with-order input [2 0 1] :csf [:feature-total])))
+    (Files/createLink (.toPath alias) (.toPath base))
+    (doseq [answer [(run "emit" base "--out" alias)
+                    (run "descend" base "--out" (str base ".journal"))
+                    (run "accept" candidate "--into" base "--force" "test")]]
+      (is (= "path_collision" (get-in answer ["error" "code"]))))
+    (is (= (plan/render input) (slurp base)))))
+
+(deftest different-tasks-get-separate-candidate-paths
+  (let [dir (temp-dir)
+        a (io/file dir "a.edn")
+        b (io/file dir "b.edn")
+        out (io/file dir "candidates")]
+    (spit a (plan/render fx/small-risk))
+    (spit b (plan/render (assoc-in fx/small-risk [:workload :seed] 121)))
+    (let [paths (fn [p] (set (map #(get % "path") (get (run "neighbors" p "--out-dir" out) "neighbors"))))
+          as (paths a)
+          bs (paths b)]
+      (is (seq as))
+      (is (= (count as) (count bs)))
+      (is (not-any? as bs)))))

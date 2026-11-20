@@ -64,3 +64,19 @@
       (is (str/starts-with? text "{:layout/version 1\n :name "))
       (is (= plan (plan/normalize (edn/read-string text))))
       (is (= text (plan/render (plan/normalize (edn/read-string text))))))))
+
+(deftest plan-file-holds-exactly-one-value
+  (let [f (java.io.File/createTempFile "layout-plan" ".edn")]
+    (try
+      (spit f (str (plan/render example) ";; trailing comment\n"))
+      (is (= example (plan/read-plan f)))
+      (spit f (str (plan/render example) "{}\n"))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"exactly one EDN value" (plan/read-plan f)))
+      (finally (.delete f)))))
+
+(deftest plan-validation-handles-malformed-values
+  (is (= #{:bad-order} (codes (assoc fx/small-risk :orders [0]))))
+  (is (= #{:bad-emit} (codes (assoc fx/small-risk :emit '{:ns demo/layout :path "layout.clj"}))))
+  (is (= #{:bad-ns-per-byte} (codes (assoc fx/small-risk :objective {:ns-per-byte ##NaN}))))
+  (is (= (:objective (plan/normalize fx/small-risk))
+         (:objective (plan/normalize (assoc fx/small-risk :objective {:ns-per-byte nil :min-gain nil}))))))

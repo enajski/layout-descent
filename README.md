@@ -26,7 +26,7 @@ clojure -M:cli facts ../some-project/src       # what the code does to nested ma
 cp examples/risk/plan.edn /tmp/plan.edn
 clojure -M:cli verify /tmp/plan.edn            # gate: compile and compare with the model
 clojure -M:cli descend /tmp/plan.edn           # greedy search, writes a candidate
-clojure -M:cli accept /tmp/candidates/<hash>.edn --into /tmp/plan.edn
+clojure -M:cli accept /tmp/candidates/<task-hash>/<layout-hash>.edn --into /tmp/plan.edn
 clojure -M:cli status /tmp/plan.edn
 ```
 
@@ -81,8 +81,10 @@ Each pattern becomes one function, named by its id:
 | `:fold :count` | `(tenant-size ds tenant)` | The number of leaves |
 
 `(build nested-map)` in the same namespace makes `ds`. `status` prints the exact call of every
-pattern. Key types are checked at `build`: a `:long` level takes any integer type, and an Integer
-key finds a Long key.
+pattern. Key types are checked at `build`: a `:long` level takes integers in the signed 64-bit range.
+An Integer key finds a Long key; `nil`, fractional and out-of-range query keys miss.
+Scan order is unspecified. Use a reducer whose result does not depend on visitation order.
+Returning `(reduced value)` stops the scan and returns `value`.
 
 ## Commands
 
@@ -94,12 +96,12 @@ goes to stdout.
 | `facts <src-dir>... [--limit N]` | nothing | Path shapes of `get-in`, `assoc-in`, `update-in`, `get`, `reduce-kv` and others, with sites |
 | `check <plan>` | nothing | Validate; hash, task, warnings or problems |
 | `status <plan>` | nothing | Orders, patterns, calls, emitted file state, last journal records |
-| `verify <plan> [--source <file>]` | nothing | The gate |
+| `verify <plan> [--source <trusted-clojure-file>]` | nothing for generated code | The gate; `--source` executes the supplied file |
 | `neighbors <plan> [--out-dir <dir>]` | candidate files | Every plan one decision away |
 | `evaluate <candidate> --against <plan>` | journal | Gate both, time both, verdict |
 | `descend <plan> [--max-steps N] [--out <file>]` | one candidate, journal | Greedy search |
 | `accept <candidate> --into <plan> [--force <reason>]` | plan, emitted file, journal | Take the candidate's decisions |
-| `emit <plan> [--out <file>]` | emitted file | Gate, then write the namespace |
+| `emit <plan> [--out <file>]` | optional preview file | Gate and preview the namespace; only `accept` writes the configured output |
 
 Exit code 0: done. Exit code 1: refused or failed; `error.code` names the cause and `error.hint`
 the next step. Exit code 2: wrong usage or an internal error.
@@ -114,16 +116,20 @@ the next step. Exit code 2: wrong usage or an internal error.
   candidate of another task, with or without `--force`.
 - **Same data, interleaved rounds.** All plans of a measurement are built from one seeded
   dataset, called with the same arguments, and timed in turn. The cost is the weighted median
-  ns for each call, plus `:ns-per-byte` times the estimated bytes.
+  ns for each call, plus `:ns-per-byte` times the estimated bytes. Both costs use the baseline’s
+  objective. Searches time candidates in bounded groups, each against its own baseline run.
 - **A verdict needs a clear difference.** `better` and `worse` need at least `:min-gain` and more
   than three times the summed spread of the samples. Everything else is `no-change`.
 - **Holdout.** A `better` verdict is measured again on data of another seed, and stays `better`
   only when that agrees. `descend` measures its chosen neighbor again on its own, which removes
   the luck of picking the minimum of several noisy numbers.
 - **One writer.** Only `accept` writes an accepted plan and its emitted file. It needs a `better`
-  record for exactly these two hashes in `<plan>.journal`, or `--force` with a reason, which the
-  journal keeps. It moves only `:orders` and `:serve`. Running it again changes nothing, and it
-  writes an emitted file again when that file is missing or was edited.
+  verdict from the latest evaluation of those two hashes under the current objective in
+  `<plan>.journal`, or `--force` with a reason, which the journal keeps. Older journal entries
+  without an objective must be remeasured. It moves only `:orders` and `:serve`. Running it again
+  changes nothing unless the emitted file is missing or stale. If publication is interrupted, fix
+  the reported write problem and rerun `accept`; it finishes the recorded change before starting
+  another. Do not remove the per-plan lock file while a command is running.
 
 ## Facts
 
@@ -171,7 +177,7 @@ Commit the plan and the emitted file together. `status` says `stale` when they d
 ## Tests
 
 ```sh
-clojure -M:cli:test              # 20 tests: plan, gate, bench, facts, command line
+clojure -M:cli:test              # plan, gate, bench, facts, command line
 python3 test/extension_test.py   # the Vis entry file, with a stub of the SDK
 ```
 

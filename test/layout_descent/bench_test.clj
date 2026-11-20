@@ -1,6 +1,8 @@
 (ns layout-descent.bench-test
   (:require [clojure.test :refer [deftest is testing]]
             [layout-descent.bench :as bench]
+            [layout-descent.gen :as gen]
+            [layout-descent.plan :as plan]
             [layout-descent.fixtures :as fx]))
 
 (def ^:private quick {:rounds 7 :warm-ms 40 :target-ms 2 :args 16})
@@ -34,3 +36,27 @@
     (is (= :no-change (verdict 100.0 1.0 97.0 0.1)) "below :min-gain")
     (is (= :no-change (verdict 100.0 4.0 80.0 4.0)) "within three times the noise")
     (is (= :no-change (verdict 100.0 0.0 100.0 0.0)))))
+
+(deftest batches-share-paths-and-price-but-keep-paired-baselines
+  (let [base (assoc-in (fx/normal fx/small-risk) [:objective :ns-per-byte] 1.0)
+        candidates (mapv #(assoc-in (:plan %) [:objective :ns-per-byte] 0.0)
+                         (take 5 (plan/neighbors base)))
+        plans (into [base] candidates)
+        paths gen/paths
+        walks (atom 0)
+        batches (atom [])
+        measure-batch (ns-resolve 'layout-descent.bench 'measure-batch)
+        batch (fn [ps _ _ _ entries seed]
+                (swap! batches conj ps)
+                (mapv #(hash-map :hash (plan/plan-hash %) :entries entries :seed seed
+                                 :objective (:objective %) :batch (count @batches)) ps))]
+    (with-redefs-fn {measure-batch batch
+                     #'gen/paths (fn [data n] (when (= 3 n) (swap! walks inc)) (paths data n))}
+      (fn []
+        (let [[b & cs :as results] (bench/measure plans quick)]
+          (is (= (mapv plan/plan-hash plans) (mapv :hash results)))
+          (is (= 1 @walks))
+          (is (= [5 2] (mapv count @batches)))
+          (is (every? #(= (:objective base) (:objective %)) results))
+          (is (every? #(= (:batch %) (get-in % [:batch-baseline :batch])) cs))
+          (is (not= (:batch b) (:batch (last cs)))))))))

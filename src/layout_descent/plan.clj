@@ -2,7 +2,8 @@
   "The plan: one checked-in EDN description of a layout, its access patterns and its workload."
   (:require [clojure.edn :as edn]
             [clojure.string :as str])
-  (:import [java.nio.charset StandardCharsets]
+  (:import [java.io PushbackReader StringReader]
+           [java.nio.charset StandardCharsets]
            [java.nio.file Files Path StandardCopyOption]
            [java.security MessageDigest]))
 
@@ -106,8 +107,9 @@
                    (str "An order needs :perm, an ordering of 0.." (dec n)
                         ", and :format, one of " (vec (sort formats)) "."))))
       orders)
-     (when-not (apply distinct? (map (juxt :perm :format) (filter map? orders)))
-       [(problem :duplicate-order [:orders] "Two orders have the same :perm and :format.")]))))
+     (let [keys (map (juxt :perm :format) (filter map? orders))]
+        (when-not (= (count keys) (count (set keys)))
+       [(problem :duplicate-order [:orders] "Two orders have the same :perm and :format.")])))))
 
 (defn- serve-problems [serve ids order-count]
   (cond
@@ -122,14 +124,17 @@
               (problem :bad-serve-index [:serve id] (str ":serve index must be 0.." (dec order-count) "."))))
           serve)))
 
+(defn- finite-number? [x]
+  (and (number? x) (Double/isFinite (double x))))
+
 (defn- workload-problems [{:keys [fanout fill seed weights] :as workload} ids n]
   (cond
     (nil? workload) []
     (not (map? workload)) [(problem :bad-workload [:workload] ":workload must be a map.")]
     :else
     (remove nil?
-            [(when-not (or (nil? fanout) (and (vector? fanout) (= n (count fanout)) (every? pos-int? fanout)))
-               (problem :bad-fanout [:workload :fanout] (str ":fanout needs " n " positive integers.")))
+            [(when-not (or (nil? fanout) (and (vector? fanout) (= n (count fanout)) (every? #(and (pos-int? %) (<= % Integer/MAX_VALUE)) fanout)))
+               (problem :bad-fanout [:workload :fanout] (str ":fanout needs " n " positive integers no larger than " Integer/MAX_VALUE ".")))
              (when-not (or (nil? fill)
                            (and (vector? fill) (= n (count fill)) (every? #(and (number? %) (< 0 % ) (<= % 1)) fill)))
                (problem :bad-fill [:workload :fill] (str ":fill needs " n " numbers in (0, 1].")))
@@ -137,9 +142,9 @@
                (problem :bad-seed [:workload :seed] ":seed must be an integer."))
              (when-not (or (nil? weights)
                            (and (map? weights) (every? ids (keys weights))
-                                (every? #(and (number? %) (pos? %)) (vals weights))))
+                                (every? #(and (finite-number? %) (pos? (double %))) (vals weights))))
                (problem :bad-weights [:workload :weights]
-                        ":weights must map pattern ids to positive numbers."))])))
+                        ":weights must map pattern ids to finite positive numbers."))])))
 
 (defn- objective-problems [{:keys [ns-per-byte min-gain] :as objective}]
   (cond
@@ -147,14 +152,17 @@
     (not (map? objective)) [(problem :bad-objective [:objective] ":objective must be a map.")]
     :else
     (remove nil?
-            [(when-not (or (nil? ns-per-byte) (and (number? ns-per-byte) (not (neg? ns-per-byte))))
+            [(when-not (or (nil? ns-per-byte) (and (finite-number? ns-per-byte) (not (neg? ns-per-byte))))
                (problem :bad-ns-per-byte [:objective :ns-per-byte] ":ns-per-byte must be zero or more."))
-             (when-not (or (nil? min-gain) (and (number? min-gain) (< 0 min-gain 1)))
+             (when-not (or (nil? min-gain) (and (finite-number? min-gain) (< 0 (double min-gain) 1)))
                (problem :bad-min-gain [:objective :min-gain] ":min-gain must be between 0 and 1."))])))
 
 (defn- emit-problems [emit]
-  (when-not (or (nil? emit) (and (map? emit) (symbol? (:ns emit)) (string? (:path emit))))
-    [(problem :bad-emit [:emit] ":emit needs :ns, a symbol, and :path, a string relative to the plan file.")]))
+  (when-not (or (nil? emit)
+                (and (map? emit) (symbol? (:ns emit))
+                     (re-matches #"[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)*" (str (:ns emit)))
+                     (string? (:path emit)) (not (str/blank? (:path emit)))))
+    [(problem :bad-emit [:emit] ":emit needs a valid namespace symbol and a non-blank path.")]))
 
 (defn problems
   "Errors that make the plan unusable. Empty when the plan is valid."
@@ -195,7 +203,7 @@
   "m as an array map: the given keys first, then the others sorted."
   [m ks]
   (let [front (filter #(contains? m %) ks)
-        back (sort (remove (set ks) (keys m)))]
+        back (sort-by pr-str (remove (set ks) (keys m)))]
     (apply array-map (mapcat (fn [k] [k (get m k)]) (concat front back)))))
 
 (defn normalize
@@ -225,8 +233,8 @@
                                    (map (fn [{:keys [id]}] [id (get-in workload [:weights id] 1)]))
                                    patterns))
          :objective (array-map
-                     :ns-per-byte (get-in plan [:objective :ns-per-byte] 0.0)
-                     :min-gain (get-in plan [:objective :min-gain] 0.05)))]
+                     :ns-per-byte (or (get-in plan [:objective :ns-per-byte]) 0.0)
+                     :min-gain (or (get-in plan [:objective :min-gain]) 0.05)))]
 
     ;; assoc would turn a map of more than eight keys into a hash map and lose the key order.
     (if-let [emit (:emit plan)]
@@ -384,7 +392,13 @@
   "Read a plan file. Throws ex-info with :code :invalid-plan and :problems when it is not usable."
   [path]
   (let [plan (try
-               (edn/read-string (slurp (str path)))
+               (with-open [r (PushbackReader. (StringReader. (slurp (str path))))]
+                  (let [eof (Object.)
+                        opts {:eof eof}
+                        value (edn/read opts r)]
+                    (when (or (identical? eof value) (not (identical? eof (edn/read opts r))))
+                      (throw (IllegalArgumentException. "Expected exactly one EDN value.")))
+                    value))
                (catch Exception e
                  (throw (ex-info (str "Cannot read plan " path ": " (ex-message e))
                                  {:code :unreadable-plan :path (str path)}))))
@@ -394,15 +408,32 @@
                       {:code :invalid-plan :path (str path) :problems found})))
     (normalize plan)))
 
-(defn write-text!
-  "Replace the file at path with text in one step, so a reader never sees half a file."
-  [path text]
-  (let [^Path target (.toAbsolutePath (Path/of (str path) (make-array String 0)))
-        tmp (.resolveSibling target (str (.getFileName target) ".tmp"))]
-    (when-let [dir (.getParent target)]
-      (Files/createDirectories dir (make-array java.nio.file.attribute.FileAttribute 0)))
-    (spit (.toFile tmp) text)
+(defn stage-text!
+  "Prepare a unique temporary file on the destination filesystem. The caller removes it on failure."
+  ^Path [path text]
+  (let [target (.toAbsolutePath (Path/of (str path) (make-array String 0)))
+        dir (.getParent target)
+        attrs (make-array java.nio.file.attribute.FileAttribute 0)]
+    (Files/createDirectories dir attrs)
+    (let [tmp (Files/createTempFile dir ".layout-descent-" ".tmp" attrs)]
+      (try
+        (Files/writeString tmp text StandardCharsets/UTF_8 (make-array java.nio.file.OpenOption 0))
+        tmp
+        (catch Throwable e
+          (Files/deleteIfExists tmp)
+          (throw e))))))
+
+(defn publish-text! [^Path tmp path]
+  (let [target (.toAbsolutePath (Path/of (str path) (make-array String 0)))]
     (Files/move tmp target
                 (into-array java.nio.file.CopyOption
                             [StandardCopyOption/ATOMIC_MOVE StandardCopyOption/REPLACE_EXISTING]))
     (str target)))
+
+(defn write-text!
+  "Replace the file at path in one step, with no shared temporary filename."
+  [path text]
+  (let [tmp (stage-text! path text)]
+    (try
+      (publish-text! tmp path)
+      (finally (Files/deleteIfExists tmp)))))

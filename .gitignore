@@ -4,6 +4,9 @@
 .nrepl-port
 /target/
 *.journal
+*.edn.lock
+*.edn.accept-pending
+.layout-descent-*.tmp
 __pycache__/
 # Candidate plans that `descend` and `neighbors` write next to a plan.
 candidates/

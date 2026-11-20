@@ -23,7 +23,9 @@
 
 (defn run
   "The answer of one pattern. A pattern with no :fold and a :scan level reduces with f from init;
-  f receives the accumulator, the scanned keys in level order, and the leaf."
+  f receives the accumulator, the scanned keys in level order, and the leaf. Scans are unordered:
+  f must produce a result independent of traversal order. Returning (reduced value) stops the
+  scan and returns value."
   ([plan pattern data args] (run plan pattern data args nil nil))
   ([plan pattern data args f init]
    (let [found (entries pattern data args)]

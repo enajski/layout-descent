@@ -52,8 +52,13 @@
   [plan]
   (load-source plan (emit/source plan {:ns (eval-ns plan)})))
 
-(defn- collect [acc & scanned-and-leaf]
-  (conj acc (vec scanned-and-leaf)))
+(defn- count-row [acc & scanned-and-leaf]
+  (update acc (vec scanned-and-leaf) (fnil inc 0)))
+
+(defn- stop-after-one [call]
+  (let [calls (volatile! 0)
+        result (call (fn [& _] (vswap! calls inc) (reduced :done)) :empty)]
+    [result @calls]))
 
 (defn- reduce? [pattern]
   (and (nil? (:fold pattern)) (some #{:scan} (:bind pattern))))
@@ -62,7 +67,7 @@
   "What a pattern returns, in a form that compares with =."
   [pattern call]
   (if (reduce? pattern)
-    (frequencies (call collect []))
+    [(call count-row {}) (stop-after-one call)]
     (let [x (call)]
       [(some-> x class .getSimpleName) x])))
 
@@ -91,15 +96,29 @@
     {:checks (count results)
      :mismatches (vec (distinct (remove nil? results)))}))
 
+(defn- edge-queries [types bind path]
+  (when path
+    (let [bound (filterv #(= :key (nth bind %)) (range (count types)))
+          args (mapv path bound)]
+      (for [[i level] (map-indexed vector bound)
+            :when (= :long (nth types level))
+            :let [k (nth args i)]
+            query [nil (+ 0.5 k) (double k) (bigint k) (biginteger k) (inc' Long/MAX_VALUE)]]
+        (assoc args i query)))))
+
 (defn- check-dataset [plan layout {:keys [name data]}]
-  (let [samples (into {}
+  (let [types (mapv :type (:levels plan))
+        paths (gen/paths data (count types))
+        opts {:n 48 :seed 5 :miss 0.4 :boxed-ints true :key-paths paths}
+        samples (into {}
                       (map (fn [pattern]
                              [(:id pattern)
-                              (gen/arg-samples plan pattern data {:n 48 :seed 5 :miss 0.4 :boxed-ints true})]))
-                      (:patterns plan))]
+                              (into (gen/arg-samples plan pattern data opts)
+                                    (edge-queries types (:bind pattern) (first paths)))])
+                           (:patterns plan)))]
     (try
       (assoc (check-built plan layout name data ((:build layout) data) samples)
-             :entries (count (gen/paths data (count (:levels plan)))))
+             :entries (count paths))
       (catch Throwable e
         {:checks 1
          :entries 0
@@ -109,10 +128,17 @@
                        :expected "a dataset"
                        :actual (str "build threw " (.getSimpleName (class e)) ": " (ex-message e))}]}))))
 
-(defn verify-source
-  "Check source text against the model of a normal plan. The result has :ok, :checks, :warnings,
-  the first :mismatches and the :datasets used. A warning fails the gate."
-  [plan text]
+(defn- compile-failure [plan ns-sym message]
+  {:ok false
+   :hash (plan/plan-hash plan)
+   :ns ns-sym
+   :checks 0
+   :warnings [message]
+   :mismatch-count 0
+   :mismatches []
+   :datasets []})
+
+(defn- check-source [plan text]
   (try
     (let [layout (load-source plan text)
           datasets (gen/edge-datasets plan)
@@ -128,17 +154,27 @@
        :datasets (mapv (fn [d r] {:name (:name d) :entries (:entries r) :checks (:checks r)}) datasets results)})
     (catch clojure.lang.ExceptionInfo e
       (if (= :compile-failed (:code (ex-data e)))
-        {:ok false
-         :hash (plan/plan-hash plan)
-         :ns (:ns (ex-data e))
-         :checks 0
-         :warnings [(ex-message e)]
-         :mismatch-count 0
-         :mismatches []
-         :datasets []}
+        (compile-failure plan (:ns (ex-data e)) (ex-message e))
         (throw e)))))
 
+(def ^:private verify-lock (Object.))
+
+(defn verify-source
+  "Execute trusted source text and check it against the model of a normal plan. The result has
+  :ok, :checks, :warnings, the first :mismatches and the :datasets used. A warning fails the gate.
+  The declared namespace must not already be loaded and is removed afterward."
+  [plan text]
+  (let [ns-sym (source-ns text)]
+    (locking verify-lock
+      (cond
+        (nil? ns-sym) (compile-failure plan nil "Source has no namespace declaration.")
+        (find-ns ns-sym) (compile-failure plan ns-sym (str "Namespace " ns-sym " is already loaded."))
+        :else (try
+                (check-source plan text)
+                (finally
+                  (remove-ns ns-sym)))))))
+
 (defn verify
-  "Emit a normal plan and check it against the model."
+  "Compile the delivered source in its declared namespace and check it against the model."
   [plan]
-  (verify-source plan (emit/source plan {:ns (eval-ns plan)})))
+  (verify-source plan (emit/source plan)))

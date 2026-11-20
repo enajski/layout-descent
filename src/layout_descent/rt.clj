@@ -24,6 +24,12 @@
     :keyword (if (keyword? k) k (bad :bad-key (str "Key " (pr-str k) " at " path " is not a keyword.") {:path path}))
     :string (if (string? k) k (bad :bad-key (str "Key " (pr-str k) " at " path " is not a string.") {:path path}))))
 
+(defn wide-long-key
+  "Normalize a query outside the fixed-width integer types, or return nil for a miss."
+  [k]
+  (when (and (integer? k) (<= Long/MIN_VALUE k Long/MAX_VALUE))
+    (long k)))
+
 (defn- check-leaf [type v path]
   (if (case type
         :double (instance? Double v)
@@ -83,11 +89,7 @@
                    (compare [_ x y]
                      (let [^ints x x
                            ^ints y y]
-                       (loop [d 0]
-                         (if (= d n)
-                           0
-                           (let [c (Integer/compare (aget x d) (aget y d))]
-                             (if (zero? c) (recur (inc d)) c))))))))
+                       (Arrays/compare x 0 n y 0 n)))))
     out))
 
 (defn- first-differences

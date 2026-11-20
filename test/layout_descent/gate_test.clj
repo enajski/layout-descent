@@ -4,6 +4,7 @@
             [layout-descent.emit :as emit]
             [layout-descent.fixtures :as fx]
             [layout-descent.gate :as gate]
+            [layout-descent.model :as model]
             [layout-descent.plan :as plan]
             [layout-descent.rt :as rt]))
 
@@ -68,7 +69,7 @@
 
 (deftest the-gate-catches-wrong-code
   (let [plan (fx/with-order fx/small-risk [2 0 1] :csf [:feature-total])
-        text (emit/source plan {:ns (gate/eval-ns plan)})]
+        text (emit/source plan {:ns 'layout-descent.gate-probe})]
     (is (:ok (gate/verify-source plan text)))
     (testing "a sum that stops one leaf early"
       (let [result (gate/verify-source plan (mutate text "(aget ptrs1 b1)" "(dec (aget ptrs1 b1))"))]
@@ -85,6 +86,66 @@
         (is (empty? (:mismatches result)))))
     (testing "text that does not compile is a failed gate, not an exception"
       (is (false? (:ok (gate/verify-source plan (str text "\n(defn broken [] (undefined-symbol))\n"))))))))
+
+(deftest the-descriptor-is-literal-and-has-only-layout-fields
+  (let [plan (fx/normal (assoc-in fx/small-risk [:orders 0 :notes] "not a runtime field"))
+        descriptor (->> (emit/source plan)
+                        (re-find #"(?s)\(def descriptor\s+('.*?)\)\n\n")
+                        second
+                        read-string)]
+    (is (= '(quote {:types [:keyword :long :keyword]
+                    :leaf :double
+                    :orders [{:perm [0 1 2] :format :hash}]})
+           descriptor))))
+
+(deftest the-gate-compiles-the-delivered-namespace
+  (let [ns-sym 'my.app.layout
+        configured (fx/normal (assoc fx/small-risk :emit {:ns ns-sym :path "layout.clj"}))
+        result (gate/verify configured)]
+    (is (:ok result) (:warnings result))
+    (is (= ns-sym (:ns result)))
+    (is (nil? (find-ns ns-sym)))
+    (testing "the gate does not modify a namespace already in use"
+      (let [existing (find-ns 'layout-descent.rt)
+            result (gate/verify (assoc-in configured [:emit :ns] (ns-name existing)))]
+        (is (false? (:ok result)))
+        (is (identical? existing (find-ns 'layout-descent.rt)))))))
+
+(deftest long-key-queries-have-map-semantics
+  (doseq [format [:hash :csf]
+          perm [[0 1 2] [1 0 2]]]
+    (let [plan (fx/normal (assoc (task :long) :orders [{:perm perm :format format}]))
+          data {:a {1 {"x" 10} Long/MIN_VALUE {"x" 20} Long/MAX_VALUE {"x" 30}}}
+          layout (gate/load-layout plan)
+          ds ((:build layout) data)
+          pattern (first (:patterns plan))
+          point (get-in layout [:fns :point])]
+      (doseq [key [nil "1" 1.0 1.75 -1 1 (int 1) 1N (biginteger 1)
+                   Long/MIN_VALUE (bigint Long/MIN_VALUE) (dec' Long/MIN_VALUE)
+                   Long/MAX_VALUE (biginteger Long/MAX_VALUE) (inc' Long/MAX_VALUE)]]
+        (is (= (model/run plan pattern data [:a key "x"])
+               (point ds :a key "x"))
+            (pr-str format perm key))))))
+
+(deftest custom-scans-are-unordered-and-can-stop
+  (doseq [format [:hash :csf]
+          perm [[0 1 2] [2 1 0]]]
+    (let [plan (fx/normal (assoc (task :long) :orders [{:perm perm :format format}]))
+          data (array-map :b (array-map 2 (array-map "y" 5 "x" 7) 1 {"x" 11})
+                          :a {3 {"z" 13}})
+          layout (gate/load-layout plan)
+          ds ((:build layout) data)
+          scan (get-in layout [:fns :everything])
+          pattern (some #(when (= :everything (:id %)) %) (:patterns plan))
+          sum (fn [acc _ _ _ leaf] (+ acc leaf))
+          calls (atom 0)]
+      (is (str/includes? (:returns (emit/signature plan pattern)) "order-independent"))
+      (is (= (model/run plan pattern data [] sum 0) (scan ds sum 0) 36))
+      (is (= :empty (scan ((:build layout) {}) (constantly (reduced :done)) :empty)))
+      (is (nil? (scan ds (fn [& _] (swap! calls inc) (reduced nil)) :empty)))
+      (is (= 1 @calls))
+      (let [nested (reduced :inner)]
+        (is (identical? nested (scan ds (constantly (reduced nested)) nil)))))))
 
 (deftest ingest-rejects-wrong-types
   (let [descriptor {:types [:keyword :long] :leaf :double :orders [{:perm [0 1] :format :csf}]}

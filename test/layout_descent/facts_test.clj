@@ -34,3 +34,33 @@
     (is (= 2 (count (:sites top))) "the limit bounds the sites, not the counts")
     (is (= 1 (:dynamic-count summary)))
     (is (= (:site-count summary) (+ 1 (reduce + (map :site-count (:shapes summary))))))))
+
+(defn- in [function]
+  (filter #(= (str "sample.core/" function) (:in %)) (:sites found)))
+
+(deftest chains-use-resolved-core-identities
+  (is (= [{:fn "get" :target "db" :path [":scores" "?tenant" "?risk"]}]
+         (mapv #(select-keys % [:fn :target :path]) (in "qualified"))))
+  (is (= [{:fn "get" :target "db" :path ["?tenant" "?risk"]}]
+         (mapv #(select-keys % [:fn :target :path]) (in "aliased"))))
+  (is (= [{:fn "get" :target "(get db :transformed)" :path ["?id"]}]
+         (mapv #(select-keys % [:fn :target :path]) (in "shadowed")))))
+
+(deftest root-scans-remain-relevant
+  (is (= [{:kind :scan :target "db" :shape ["*"]}]
+         (mapv #(select-keys % [:kind :target :shape]) (in "root-scan"))))
+  (is (empty? (in "constant-key"))))
+
+(deftest threading-uses-the-macro-argument-position
+  (doseq [function ["threaded-last" "threaded-bare"]]
+    (is (= [{:kind :scan :target "<threaded>" :shape ["*"]}]
+           (mapv #(select-keys % [:kind :target :shape]) (in function)))))
+  (is (= [{:target "scores" :path ["?<threaded>"]}]
+         (mapv #(select-keys % [:target :path]) (in "threaded-last-key")))))
+
+(deftest writes-report-each-key
+  (is (= [["assoc" [":scores" "?tenant"]]
+          ["assoc" [":scores" "?entity"]]
+          ["dissoc" [":scores" "?tenant"]]
+          ["dissoc" [":scores" "?entity"]]]
+         (mapv (juxt :fn :path) (in "multi-write")))))
