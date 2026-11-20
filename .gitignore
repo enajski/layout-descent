@@ -1,0 +1,9 @@
+.cpcache/
+.clj-kondo/.cache
+.lsp/
+.nrepl-port
+/target/
+*.journal
+__pycache__/
+# Candidate plans that `descend` and `neighbors` write next to a plan.
+candidates/

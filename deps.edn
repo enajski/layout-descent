@@ -1,0 +1,12 @@
+{:paths ["src"]
+ ;; A project that loads an emitted namespace depends on this: the runtime needs Clojure only.
+ :deps {org.clojure/clojure {:mvn/version "1.12.0"}}
+ :aliases
+ {;; The tool: clojure -M:cli <command>
+  :cli {:extra-deps {org.clojure/data.json {:mvn/version "2.5.1"}
+                     clj-kondo/clj-kondo {:mvn/version "2026.10.26"}
+                     borkdude/edamame {:mvn/version "1.6.44"}}
+        :main-opts ["-m" "layout-descent.cli"]}
+  ;; The tests: clojure -M:cli:test
+  :test {:extra-paths ["test"]
+         :main-opts ["-m" "layout-descent.test-runner"]}}}

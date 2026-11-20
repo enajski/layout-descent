@@ -1,0 +1,15 @@
+{:layout/version 1
+ :name risk
+ :levels [{:id :tenant :type :keyword}
+          {:id :entity :type :long}
+          {:id :feature :type :keyword}]
+ :leaf {:type :double}
+ :patterns [{:id :value :bind [:key :key :key]}
+            {:id :entity-features :bind [:key :key :scan]}
+            {:id :feature-total :bind [:scan :scan :key] :fold :sum}
+            {:id :tenant-size :bind [:key :scan :scan] :fold :count}]
+ :orders [{:perm [0 1 2] :format :hash}]
+ :workload {:fanout [8 400 24]
+            :fill [1.0 0.9 0.5]
+            :seed 7
+            :weights {:value 10 :entity-features 6 :feature-total 2 :tenant-size 1}}}
