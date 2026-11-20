@@ -68,11 +68,21 @@
   [{:keys [n]} d end]
   (reduce (fn [expr depth] (str "(aget ptrs" depth " " expr ")")) (str end d) (range d (dec n))))
 
+(defn- csf-span-op
+  "A trailing run of scans selects the whole contiguous leaf span. A key in the
+  remaining physical levels requires traversal, even when this level is a scan."
+  [{:keys [perm bind mode]} d]
+  (when (and (#{:count :sum} mode)
+             (every? #(= :scan (nth bind %)) (subvec perm d)))
+    (case mode
+      :count :span-count
+      :sum :span-sum)))
+
 (defn- csf-level [{:keys [n perm bind types mode leaf] :as ctx} d]
   (let [level (nth perm d)
         last? (= d (dec n))
         p (str "p" d)
-        only-scans-below? (every? #(= :scan (nth bind %)) (subvec perm d))
+        span-op (csf-span-op ctx d)
         inner #(if last?
                  (combine ctx (str "(aget leaves " p ")"))
                  (str "(let [a" (inc d) " (aget ptrs" d " " p ")\n"
@@ -92,11 +102,10 @@
            "      (when-not (neg? " p ")\n"
            "        " (nest 8 (inner)) "))))")
 
-      ;; The leaves under one node are contiguous, so trailing scans need no loop over nodes.
-      (and only-scans-below? (= :count mode))
+      (= :span-count span-op)
       (add-to-cell (str "(- " (span-end ctx d "b") " " (span-end ctx d "a") ")"))
 
-      (and only-scans-below? (= :sum mode))
+      (= :span-sum span-op)
       (add-to-cell (str "(rt/sum-" (name leaf) "s leaves " (span-end ctx d "a") " " (span-end ctx d "b") ")"))
 
       (= :reduce mode)

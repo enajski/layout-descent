@@ -147,6 +147,35 @@
       (let [nested (reduced :inner)]
         (is (identical? nested (scan ds (constantly (reduced nested)) nil)))))))
 
+(defn- check-csf-sum [leaf-type data]
+  (let [id :grand-total
+        plan (fx/normal {:layout/version 1 :name 'numeric-probe
+                         :levels [{:id :key :type :long}]
+                         :leaf {:type leaf-type}
+                         :patterns [{:id id :bind [:scan] :fold :sum}]
+                         :orders [{:perm [0] :format :csf}]})
+        layout (gate/load-layout plan)]
+    (:mismatches (gate/check-built plan layout :numeric data ((:build layout) data) {id [[]]}))))
+
+(deftest adversarial-sums-expose-traversal-order
+  (testing "double cancellation changes the result"
+    (let [[mismatch] (check-csf-sum :double (array-map 0 1.0e16 2 -1.0e16 1 1.0))]
+      (is (= :grand-total (:pattern mismatch)))
+      (is (= ["Double" 1.0] (some-> mismatch :expected read-string)))
+      (is (= ["Double" 0.0] (some-> mismatch :actual read-string)))))
+  (testing "CSF can avoid a checked overflow in the model"
+    (let [[mismatch] (check-csf-sum :long (array-map 0 Long/MAX_VALUE 2 1 1 -1))]
+      (is (= :grand-total (:pattern mismatch)))
+      (is (= :threw (some-> mismatch :expected read-string first)))
+      (is (= ["Long" Long/MAX_VALUE] (some-> mismatch :actual read-string)))))
+  (testing "CSF can introduce a checked overflow absent in the model"
+    (let [[mismatch] (check-csf-sum :long (array-map 0 Long/MAX_VALUE 2 -1 1 1))]
+      (is (= :grand-total (:pattern mismatch)))
+      (is (= ["Long" Long/MAX_VALUE] (some-> mismatch :expected read-string)))
+      (is (= :threw (some-> mismatch :actual read-string first)))))
+  (testing "matching overflows are not disagreements"
+    (is (empty? (check-csf-sum :long (array-map 0 Long/MAX_VALUE 1 1))))))
+
 (deftest ingest-rejects-wrong-types
   (let [descriptor {:types [:keyword :long] :leaf :double :orders [{:perm [0 1] :format :csf}]}
         code #(try (rt/build-dataset descriptor %) :built (catch clojure.lang.ExceptionInfo e (:code (ex-data e))))]

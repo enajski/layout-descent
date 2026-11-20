@@ -71,6 +71,9 @@
     (let [x (call)]
       [(some-> x class .getSimpleName) x])))
 
+(defn- threw [e]
+  [:threw (str (.getSimpleName (class e)) ": " (ex-message e))])
+
 (defn- clip [x]
   (let [s (pr-str x)]
     (if (> (count s) 240) (str (subs s 0 240) "…") s)))
@@ -83,10 +86,13 @@
         (for [pattern (:patterns plan)
               args (get samples (:id pattern))
               :let [f (get (:fns layout) (:id pattern))
-                    expected (answer pattern (fn [& extra] (apply model/run plan pattern data args extra)))
+                    expected (try
+                                (answer pattern (fn [& extra] (apply model/run plan pattern data args extra)))
+                                ;; Checked long addition can overflow on valid input.
+                                (catch ArithmeticException e (threw e)))
                     actual (try
                              (answer pattern (fn [& extra] (apply f ds (concat extra args))))
-                             (catch Throwable e [:threw (str (.getSimpleName (class e)) ": " (ex-message e))]))]]
+                             (catch Throwable e (threw e)))]]
           (when (not= expected actual)
             {:dataset label
              :pattern (:id pattern)
