@@ -197,3 +197,41 @@
      :gain gain
      :delta-ns delta
      :noise-ns noise}))
+
+(defn weight-sensitivity
+  "How the comparison of two summaries depends on :weights. The cost difference is the weighted
+  mean of :net-ns, the time a pattern gains plus the memory charge that every pattern carries. A
+  pattern is :better, :worse or :same for the candidate by :net-ns against three times its noise;
+  the weights decide only when both :better and :worse occur. :flip-factor is the multiple of that
+  pattern's weight at which the difference changes sign with the other weights fixed; it is nil
+  for a :same pattern and when no positive multiple does that."
+  [objective base candidate]
+  (let [memory (* (double (:ns-per-byte objective)) (- (double (:bytes base)) (double (:bytes candidate))))
+        rows (mapv (fn [b c]
+                     (let [delta (- (double (:ns b)) (double (:ns c)))
+                           net (+ delta memory)
+                           noise (* 3.0 (+ (double (:spread b)) (double (:spread c))))]
+                       {:pattern (:pattern b)
+                        :weight (:weight b)
+                        :delta-ns delta
+                        :net-ns net
+                        :noise-ns noise
+                        :effect (cond (> net noise) :better (< net (- noise)) :worse :else :same)}))
+                   (:patterns base) (:patterns candidate))
+        sum (double (reduce + 0.0 (map #(* (double (:weight %)) (double (:net-ns %))) rows)))
+        flip (fn [{:keys [weight net-ns effect]}]
+               (let [own (* (double weight) (double net-ns))
+                     m (when-not (or (= :same effect) (zero? own))
+                         (/ (- own sum) own))]
+                 (when (and m (pos? (double m)) (Double/isFinite (double m))) m)))
+        rows (mapv #(assoc % :flip-factor (flip %)) rows)
+        effects (set (map :effect rows))
+        mixed? (boolean (and (effects :better) (effects :worse)))]
+    {:depends-on-weights mixed?
+     :summary (cond
+                mixed? "The candidate wins on some patterns and loses on others: the verdict depends on :weights. flip_factor is the multiple of one weight that reverses the sign of the difference."
+                (effects :better) "The candidate loses on no pattern beyond its noise: the direction holds for any weights."
+                (effects :worse) "The candidate wins on no pattern beyond its noise: the direction holds for any weights."
+                :else "No pattern differs beyond its noise: no weights give a clear verdict.")
+     :memory-ns memory
+     :patterns rows}))

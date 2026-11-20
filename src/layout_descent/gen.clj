@@ -18,25 +18,46 @@
     :long (long (.nextInt r 1000))
     :object (str "v" (.nextInt r 1000))))
 
-(defn- node [types leaf-type fanout fill ^Random r depth]
+(defn- drawn-indices
+  "k distinct indices of 0..n-1 in rising order, drawn by r without replacement. Floyd's sampling:
+  k draws and memory for k indices, whatever n is."
+  [^Random r n k]
+  (let [n (long n)]
+    (loop [j (- n (long k))
+           chosen (sorted-set)]
+      (if (= j n)
+        chosen
+        (let [t (long (.nextInt r (int (inc j))))]
+          (recur (inc j) (conj chosen (if (contains? chosen t) j t))))))))
+
+(defn- node [types leaf-type fanout fill degree ^Random r depth]
   (if (= depth (count types))
     (leaf-value leaf-type r)
     (let [type (nth types depth)
-          p (double (nth fill depth))]
-      (persistent!
-       (reduce (fn [m i]
-                 (if (< (.nextDouble r) p)
-                   (assoc! m (level-key type i) (node types leaf-type fanout fill r (inc depth)))
-                   m))
-               (transient {})
-               (range (nth fanout depth)))))))
+          width (long (nth fanout depth))
+          child #(node types leaf-type fanout fill degree r (inc depth))]
+      (if-some [k (nth degree depth nil)]
+        (persistent!
+         (reduce (fn [m i] (assoc! m (level-key type i) (child)))
+                 (transient {})
+                 (drawn-indices r width (min (long k) width))))
+        (let [p (double (nth fill depth))]
+          (persistent!
+           (reduce (fn [m i]
+                     (if (< (.nextDouble r) p)
+                       (assoc! m (level-key type i) (child))
+                       m))
+                   (transient {})
+                   (range width))))))))
 
 (defn data
-  "The nested map of a normal plan's workload. opts may replace :fanout, :fill or :seed."
+  "The nested map of a normal plan's workload. opts may replace :fanout, :fill, :degree or :seed.
+  A level with a degree gives every parent exactly that many keys, or its whole fanout when the
+  fanout is smaller; a level without one keeps each key with the probability of its fill."
   ([plan] (data plan nil))
   ([plan opts]
-   (let [{:keys [fanout fill seed]} (merge (:workload plan) opts)]
-     (node (mapv :type (:levels plan)) (:type (:leaf plan)) fanout fill (Random. (long seed)) 0))))
+   (let [{:keys [fanout fill degree seed]} (merge (:workload plan) opts)]
+     (node (mapv :type (:levels plan)) (:type (:leaf plan)) fanout fill degree (Random. (long seed)) 0))))
 
 (defn paths
   "Every full key path of nested data with n levels."
@@ -76,9 +97,13 @@
       [[]]
       (mapv sample (range n)))))
 
-(defn- scaled [plan cap fill seed]
+(defn- scaled
+  "A small sample of the workload shape. It drops :degree: the given fill decides, so the sparse
+  sample stays sparse, and a plan has the same edge datasets with and without a degree."
+  [plan cap fill seed]
   (data plan {:fanout (mapv #(min (long cap) (long %)) (:fanout (:workload plan)))
               :fill (vec (repeat (count (:levels plan)) fill))
+              :degree nil
               :seed seed}))
 
 (defn edge-datasets

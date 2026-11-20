@@ -60,3 +60,31 @@
           (is (every? #(= (:objective base) (:objective %)) results))
           (is (every? #(= (:batch %) (get-in % [:batch-baseline :batch])) cs))
           (is (not= (:batch b) (:batch (last cs)))))))))
+
+(deftest sensitivity-says-when-the-weights-decide
+  (let [summary (fn [bytes & ns] {:bytes bytes
+                                  :patterns (mapv (fn [id n] {:pattern id :ns n :spread 0.1 :weight 1}) [:a :b] ns)})
+        sensitivity #(bench/weight-sensitivity {:ns-per-byte %1} %2 %3)
+        mixed (sensitivity 0.0 (summary 100 10.0 100.0) (summary 100 20.0 50.0))]
+    (is (true? (:depends-on-weights mixed)))
+    (is (= [:worse :better] (mapv :effect (:patterns mixed))))
+    (testing "five times the weight of the slower pattern cancels the gain of the other"
+      (is (= [5.0 0.2] (mapv :flip-factor (:patterns mixed)))))
+    (testing "a gain on every pattern holds for any weights"
+      (let [clear (sensitivity 0.0 (summary 100 10.0 100.0) (summary 100 5.0 50.0))]
+        (is (false? (:depends-on-weights clear)))
+        (is (= [nil nil] (mapv :flip-factor (:patterns clear))))))
+    (testing "a difference inside the noise is no effect"
+      (is (= [:same :same] (mapv :effect (:patterns (sensitivity 0.0 (summary 100 10.0 100.0) (summary 100 10.2 99.9)))))))
+    (testing "priced memory is charged to every pattern"
+      (let [priced (sensitivity 1.0 (summary 100 10.0 100.0) (summary 110 5.0 50.0))]
+        (is (= -10.0 (:memory-ns priced)))
+        (is (= [-5.0 40.0] (mapv :net-ns (:patterns priced))))
+        (is (= [:worse :better] (mapv :effect (:patterns priced))))
+        (is (= [8.0 0.125] (mapv :flip-factor (:patterns priced))))
+        (is (true? (:depends-on-weights priced)))))
+    (testing "memory that costs more than the largest gain loses for any weights"
+      (let [dear (sensitivity 1.0 (summary 100 10.0 100.0) (summary 200 5.0 50.0))]
+        (is (= [:worse :worse] (mapv :effect (:patterns dear))))
+        (is (false? (:depends-on-weights dear)))
+        (is (= [nil nil] (mapv :flip-factor (:patterns dear))))))))

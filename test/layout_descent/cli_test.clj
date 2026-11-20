@@ -4,7 +4,9 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [layout-descent.cli :as cli]
+            [layout-descent.emit :as emit]
             [layout-descent.fixtures :as fx]
+            [layout-descent.gen]
             [layout-descent.plan :as plan])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
@@ -60,6 +62,9 @@
                [(get answer "exit") (get answer "verdict") (get-in answer ["holdout" "verdict"])])
             (pr-str (select-keys answer ["error" "verdict" "reason" "gain"])))
         (is (str/starts-with? (get answer "next") "accept "))
+        (is (boolean? (get-in answer ["sensitivity" "depends_on_weights"])))
+        (is (= (mapv #(get % "pattern") (get-in answer ["baseline" "patterns"]))
+               (mapv #(get % "pattern") (get-in answer ["sensitivity" "patterns"]))))
         (is (= 1 (get-in (run "status" path) ["journal" "records"])))))
 
     (testing "accept moves the orders, keeps the rest, and emits"
@@ -80,9 +85,29 @@
 
     (testing "an emitted file that was edited is stale, and accept writes it again"
       (spit emitted (str (slurp emitted) "\n;; edited by hand\n"))
-      (is (= "stale" (get-in (run "status" path) ["emitted" "state"])))
+      (is (= ["stale" "file-edited"] (mapv (get (run "status" path) "emitted") ["state" "cause"])))
       (is (true? (get-in (run "accept" candidate "--into" path) ["emitted" "written"])))
       (is (= "current" (get-in (run "status" path) ["emitted" "state"]))))
+
+    (testing "status tells an emitter that changed from a plan that changed"
+      (let [source emit/source]
+        (with-redefs [emit/source (fn newer
+                                    ([p] (newer p nil))
+                                    ([p opts] (str (source p opts) "\n;; a newer emitter\n")))]
+          (let [emitted-now (get (run "status" path) "emitted")]
+            (is (= ["stale" "emitter-changed"] (mapv emitted-now ["state" "cause"])))
+            (is (str/includes? (get emitted-now "fix") "accept ")))))
+      (let [accepted (slurp path)]
+        (spit path (plan/render (fx/normal (assoc fx/small-risk :emit '{:ns demo.layout :path "gen/demo/layout.clj"}))))
+        (let [emitted-now (get (run "status" path) "emitted")]
+          (is (= "plan-changed" (get emitted-now "cause")))
+          (is (str/includes? (get emitted-now "fix") (get pick "hash")) "the fix names the accepted plan")
+          (is (not (str/includes? (get emitted-now "fix") "--into"))))
+        (testing "another namespace is a change of the plan, not of the emitter"
+          (spit path (str/replace accepted "demo.layout" "demo.other"))
+          (is (= ["stale" "plan-renamed"] (mapv (get (run "status" path) "emitted") ["state" "cause"]))))
+        (spit path accepted)
+        (is (= "current" (get-in (run "status" path) ["emitted" "state"])))))
 
     (testing "the emitted file passes the gate, and a wrong one does not"
       (is (= 0 (get (run "verify" path "--source" emitted) "exit")))
@@ -116,15 +141,89 @@
     (is (= 1 (count (get answer "steps"))))
     (is (= "add-order" (get-in answer ["steps" 0 "chosen" "move" "op"])))
     (is (= (get answer "final") (plan/plan-hash (plan/read-plan (get answer "candidate")))))
+    (testing "every step carries the numbers of a report, and the chosen plan is on disk"
+      (let [step (get-in answer ["steps" 0])
+            chosen (get step "chosen")
+            ids (mapv name (map :id (:patterns fx/small-risk)))]
+        (is (pos? (long (get step "bytes"))))
+        (is (= ids (mapv #(get % "pattern") (get step "patterns"))))
+        (is (every? #(and (pos? (long (get % "bytes"))) (= (count ids) (count (get % "patterns"))))
+                    (filter #(get % "cost") (get step "candidates"))))
+        (is (= (get chosen "hash") (plan/plan-hash (plan/read-plan (get chosen "path")))))
+        (is (= [(get answer "start") (get answer "final")]
+               (mapv #(get-in answer ["measured" % "hash"]) ["baseline" "candidate"])))
+        (is (= ids (mapv #(get % "pattern") (get-in answer ["measured" "candidate" "patterns"]))))))
+    (testing "the journal reads as JSON, with the numbers of each pattern"
+      (let [listed (run "journal" path)
+            entry (first (get listed "entries"))]
+        (is (= [0 1 1] [(get listed "exit") (get listed "records") (count (get listed "entries"))]))
+        (is (= ["evaluate" (get answer "start") (get answer "final")]
+               (mapv entry ["op" "baseline" "candidate"])))
+        (is (every? #(and (number? (get % "baseline_ns")) (number? (get % "candidate_ns"))) (get entry "patterns")))
+        (is (pos? (long (get entry "candidate_bytes"))))
+        (is (= 2 (get (run "journal" path "--last" "0") "exit")))
+        (is (= 2 (get (run "journal" (io/file dir "no-such-plan.edn")) "exit")) "a wrong path is not an empty journal")
+        (is (= 0 (get listed "unreadable_lines")))
+        (let [journal-file (str path ".journal")
+              whole (slurp journal-file)]
+          (spit journal-file (str whole "{:op :evaluate :verdict"))
+          (is (= [1 1] (mapv (run "journal" path) ["records" "unreadable_lines"])))
+          (spit journal-file whole))))
+    (testing "measure times plans of one task and writes nothing"
+      (let [before (slurp (str path ".journal"))
+            measured (apply run "measure" path (get answer "candidate") fast)
+            [a b] (get measured "plans")]
+        (is (= 0 (get measured "exit")) (pr-str (get measured "error")))
+        (is (= [(get answer "start") (get answer "final")] [(get a "hash") (get b "hash")]))
+        (is (every? #(and (number? (get % "cost")) (pos? (long (get % "bytes"))) (seq (get % "patterns"))) [a b]))
+        (is (= before (slurp (str path ".journal"))))
+        (is (= "same_plan" (get-in (run "measure" path path) ["error" "code"])))
+        (is (= 2 (get (run "measure") "exit")))))
     (testing "descend does not write the plan; accept does"
       (is (= (get answer "start") (get (run "check" path) "hash")))
       (is (= 0 (get (run "accept" (get answer "candidate") "--into" path) "exit")))
       (is (= (get answer "final") (get (run "check" path) "hash"))))))
 
+(deftest notes-and-degree-pass-through-the-commands
+  (let [dir (temp-dir)
+        path (str (io/file dir "plan.edn"))
+        notes ["Sizes from bench_data.clj." "Leaf simplified to one double."]
+        input (-> fx/small-risk
+                  (assoc :notes notes :emit '{:ns demo.layout :path "gen/demo/layout.clj"})
+                  (assoc-in [:workload :degree] [nil nil 3]))
+        candidate (str (io/file dir "candidate.edn"))]
+    (spit path (str ";; a comment that accept drops\n" (pr-str input)))
+    (spit candidate (plan/render (fx/with-order input [2 0 1] :csf [:feature-total])))
+    (is (= 0 (get (run "accept" candidate "--into" path "--force" "test") "exit")))
+    (is (= notes (:notes (plan/read-plan path))))
+    (is (= [nil nil 3] (get-in (plan/read-plan path) [:workload :degree])))
+    (is (not (str/includes? (slurp path) "a comment")))
+    (is (= notes (get (run "status" path) "notes")))
+    (testing "two orders with free memory are a warning of check"
+      (is (some #(= "memory-not-priced" (get % "code")) (get (run "check" path) "warnings"))))
+    (testing "a candidate with another degree is another task"
+      (let [other (str (io/file dir "other.edn"))]
+        (spit other (pr-str (assoc-in input [:workload :degree] [nil nil 4])))
+        (is (= "task_mismatch" (get-in (run "evaluate" other "--against" path) ["error" "code"])))))
+    (testing "every entity has exactly three features in the measured data"
+      (let [measured (apply run "measure" path fast)
+            entities (count (for [[_ es] (layout-descent.gen/data (plan/read-plan path)) e es] e))]
+        (is (= 0 (get measured "exit")) (pr-str (get measured "error")))
+        (is (= (* 3 entities) (get measured "entries")))))))
+
 (deftest facts-command
   (let [answer (run "facts" "test/fixtures/sample/src" "--limit" "1")]
     (is (= 0 (get answer "exit")))
     (is (= [":scores" "?" "?" ":risk"] (get-in answer ["shapes" 0 "shape"])))
+    (testing "shallow shapes and writes are counted, and shown on request"
+      (let [all (run "facts" "test/fixtures/sample/src" "--limit" "0" "--min-depth" "0" "--writes" "true")]
+        (is (pos? (long (get-in answer ["hidden" "sites"]))))
+        (is (pos? (long (get-in answer ["hidden" "writes"]))))
+        (is (= [0 0] (mapv #(get-in all ["hidden" %]) ["sites" "writes"])))
+        (is (< (count (get answer "shapes")) (count (get all "shapes"))))
+        (is (every? #(empty? (get % "sites")) (get all "shapes")))
+        (is (not (str/starts-with? (get-in answer ["shapes" 0 "sites" 0 "file"]) "/")))
+        (is (= 2 (get (run "facts" "test/fixtures/sample/src" "--writes" "yes") "exit")))))
     (is (= 2 (get (run "facts" "no/such/dir") "exit")))))
 
 (deftest acceptance-writes-and-recovery

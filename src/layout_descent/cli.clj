@@ -13,28 +13,34 @@
   (:import (java.io File)
            (java.nio.channels FileChannel)
            (java.nio.file Files LinkOption OpenOption Path StandardOpenOption)
+           (java.nio.charset StandardCharsets)
+           (java.security MessageDigest)
            (java.util LinkedHashMap UUID)))
 
 (def commands
   "Every command: its usage, what it changes, and what it is for."
   [{:name "help" :usage "help" :writes "nothing"
     :doc "List the commands."}
-   {:name "facts" :usage "facts <src-dir>... [--limit N]" :writes "nothing"
-    :doc "Where a code base reads, writes and scans nested maps, grouped by path shape."}
+   {:name "facts" :usage "facts <src-dir>... [--limit N] [--min-depth N] [--writes true|false]" :writes "nothing"
+    :doc "Where a code base reads and scans nested maps, grouped by path shape. Shapes with fewer than --min-depth (2) computed levels and write sites are counted in `hidden`. --limit 0 gives counts only."}
    {:name "check" :usage "check <plan>" :writes "nothing"
     :doc "Validate a plan file. Gives its hash, task and warnings, or its problems."}
    {:name "status" :usage "status <plan>" :writes "nothing"
-    :doc "The plan in full: which order serves each pattern, the emitted functions, the journal."}
+    :doc "The plan in full: which order serves each pattern, the emitted functions and why they are stale, the last journal records."}
+   {:name "journal" :usage "journal <plan> [--last N]" :writes "nothing"
+    :doc "Every record of <plan>.journal as JSON: evaluations with per-pattern numbers, acceptances."}
+   {:name "measure" :usage "measure <plan>... [--rounds N] [--warm-ms N]" :writes "nothing"
+    :doc "Time plans of one task on the same data: cost, bytes and ns of each pattern. No verdict and no journal record. Numbers compare inside one call only."}
    {:name "verify" :usage "verify <plan> [--source <trusted-clojure-file>]" :writes "nothing"
     :doc "Run the gate. --source executes the supplied Clojure file; use only trusted code."}
    {:name "neighbors" :usage "neighbors <plan> [--out-dir <dir>]" :writes "candidate files in --out-dir"
     :doc "Every plan one decision away. A starting set of candidates; any valid plan of the task may be one."}
    {:name "evaluate" :usage "evaluate <candidate> --against <plan> [--rounds N] [--warm-ms N]"
     :writes "one line in <plan>.journal"
-    :doc "Gate both plans, time them on the same data, and give a verdict: better, worse or no-change."}
+    :doc "Gate both plans, time them on the same data, and give a verdict: better, worse or no-change. `sensitivity` says whether the verdict depends on :weights."}
    {:name "descend" :usage "descend <plan> [--max-steps N] [--out <file>] [--rounds N] [--warm-ms N]"
-    :writes "one candidate file, lines in <plan>.journal"
-    :doc "Greedy search over neighbors. A baseline for the search, and a candidate to accept."}
+    :writes "the chosen plan of every step under candidates/ beside the plan, the final one also at --out, lines in <plan>.journal"
+    :doc "Greedy search over neighbors. Every step gives cost, bytes and per-pattern ns of the plan and of each neighbor. A baseline for the search, and a candidate to accept."}
    {:name "accept" :usage "accept <candidate> --into <plan> [--force <reason>]"
     :writes "<plan>, its emitted file, one line in <plan>.journal"
     :doc "Move the orders of a candidate into the plan. Needs a better verdict in the journal."}
@@ -42,7 +48,8 @@
     :doc "Gate and return source, or write a preview to --out. Only accept writes the configured emitted file."}])
 
 (def ^:private flags-of
-  {"help" #{} "facts" #{:limit} "check" #{} "status" #{} "verify" #{:source} "neighbors" #{:out-dir}
+  {"help" #{} "facts" #{:limit :min-depth :writes} "check" #{} "status" #{} "journal" #{:last}
+   "measure" #{:rounds :warm-ms} "verify" #{:source} "neighbors" #{:out-dir}
    "evaluate" #{:against :rounds :warm-ms} "descend" #{:max-steps :out :rounds :warm-ms}
    "accept" #{:into :force} "emit" #{:out}})
 
@@ -195,6 +202,7 @@
      :delta-ns (:delta-ns first-look)
      :noise-ns (:noise-ns first-look)
      :holdout holdout
+     :sensitivity (bench/weight-sensitivity (:objective base) b c)
      :baseline (brief b)
      :candidate (brief c))))
 
@@ -210,6 +218,10 @@
                     :baseline-cost (:cost (:baseline result))
                     :candidate-cost (:cost (:candidate result))
                     :holdout (:verdict (:holdout result))
+                    :baseline-bytes (:bytes (:baseline result))
+                    :candidate-bytes (:bytes (:candidate result))
+                    :patterns (mapv (fn [b c] {:pattern (:pattern b) :baseline-ns (:ns b) :candidate-ns (:ns c)})
+                                    (:patterns (:baseline result)) (:patterns (:candidate result)))
                     :rounds (:rounds opts)})))
 
 (defn- same-task! [base candidate]
@@ -228,6 +240,57 @@
     (not (.exists (io/file ^String target))) :missing
     (= (slurp target) (emit/source plan)) :current
     :else :stale))
+
+(defn- text-digest [^String text]
+  (let [bytes (.digest (MessageDigest/getInstance "SHA-256") (.getBytes text StandardCharsets/UTF_8))]
+    (subs (apply str (map #(format "%02x" %) bytes)) 0 16)))
+
+(def ^:private stale-causes
+  {:plan-changed "The layout decisions of the plan file changed outside accept."
+   :plan-renamed "The :name or the :emit :ns of the plan changed after its last accept."
+   :file-edited "The emitted file was edited after accept wrote it."
+   :emitter-changed "layout-descent emits other source for this plan than at the last accept."
+   :file-or-emitter-changed "The emitted file or the emitter changed; the journal comes from a version that kept no digest of the written source."})
+
+(defn- source-names
+  "What the emitted source takes from a plan beyond the decisions that the plan hash covers."
+  [plan]
+  {:name (:name plan) :ns (emit/ns-symbol plan)})
+
+(defn- stale-cause
+  "Why an emitted file differs from the source of its plan. The plan hash in the file tells a
+  change of the decisions; the last record of a written source tells the rest."
+  [plan text records]
+  (let [written (last (filter :source-digest records))]
+    (cond
+      (not= (plan/plan-hash plan) (second (re-find #"\(def plan-hash \"([0-9a-f]+)\"\)" text))) :plan-changed
+      (nil? written) :file-or-emitter-changed
+      (not= (:source-digest written) (text-digest text)) :file-edited
+      (and (:source-names written) (not= (:source-names written) (source-names plan))) :plan-renamed
+      :else :emitter-changed)))
+
+(defn- emitted-status [path plan target records]
+  (let [state (emit-state plan target)
+        text (when (= :stale state) (slurp target))
+        cause (when text (stale-cause plan text records))]
+    (cond-> (array-map :path target :ns (emit/ns-symbol plan) :state state)
+      cause (assoc :cause cause
+                   :why (stale-causes cause)
+                   :fix (if (= :plan-changed cause)
+                          (str "Put the accepted plan "
+                               (or (second (re-find #"\(def plan-hash \"([0-9a-f]+)\"\)" text)) "of the emitted file")
+                               " back, save the edit as a candidate, then evaluate and accept it.")
+                          (str "accept " path " --into " path " gates the plan and writes the file again."))))))
+
+(defn- pattern-ns [summary]
+  (mapv #(select-keys % [:pattern :ns]) (:patterns summary)))
+
+(defn- keep-candidate!
+  "Write a candidate under candidates/<task>/ beside the plan. Returns its path."
+  [plan-path plan candidate]
+  (let [out (candidate-file (beside plan-path "candidates") candidate)]
+    (separate! out (conj (plan-files plan-path) (emit-target plan-path plan nil)))
+    (plan/write-text! out (plan/render candidate))))
 
 (defn- served [plan]
   (mapv (fn [pattern]
@@ -258,9 +321,10 @@
    :loop ["facts <src-dir> to see the access shapes of the code"
           "write a plan: levels, leaf, patterns, one order, a workload"
           "check, then verify"
-          "neighbors, or write a candidate that keeps the task"
+          "descend <plan>, or neighbors, or write a candidate that keeps the task"
           "evaluate <candidate> --against <plan>"
-          "accept <candidate> --into <plan> when the verdict is better"]})
+          "accept <candidate> --into <plan> when the verdict is better"
+          "for a report: the steps of descend, measure <plan>..., journal <plan>"]})
 
 (defmethod command "facts" [_ {:keys [positional flags]}]
   (when (empty? positional)
@@ -269,7 +333,13 @@
     (fail :usage (str "No such path: " path)))
   (let [analyze (requiring-resolve 'layout-descent.facts/analyze)
         summarize (requiring-resolve 'layout-descent.facts/summarize)]
-    (assoc (summarize (analyze positional) (int-flag flags :limit 5 1))
+    (assoc (summarize (analyze positional)
+                      (int-flag flags :limit 5 0)
+                      {:min-depth (int-flag flags :min-depth 2 0)
+                       :writes (case (:writes flags "false")
+                                 "true" true
+                                 "false" false
+                                 (fail :usage "--writes must be true or false."))})
            :legend {:? "a key that the code computes: a :key level"
                     :* "every key: a :scan level"
                     :other "a constant: part of the schema, not a level"})))
@@ -290,6 +360,7 @@
     (array-map
      :plan (absolute path)
      :name (:name plan)
+     :notes (:notes plan)
      :hash (plan/plan-hash plan)
      :task (plan/task-hash plan)
      :levels (:levels plan)
@@ -298,11 +369,45 @@
      :patterns (served plan)
      :warnings (plan/warnings plan)
      :objective (:objective plan)
-     :emitted {:path target :ns (emit/ns-symbol plan) :state (emit-state plan target)}
+     :emitted (emitted-status path plan target records)
      :journal {:path (journal-path path)
                :accept-pending (.exists (io/file (pending-path path)))
                :records (count records)
                :last (vec (take-last 5 records))})))
+
+(defmethod command "journal" [_ {:keys [flags] :as args}]
+  (let [path (one-path "journal" args)
+        _ (when-not (.exists (io/file ^String path))
+            (fail :usage (str "No such plan: " path)))
+        records (journal path)
+        file (io/file (journal-path path))
+        lines (if (.exists file) (count (remove str/blank? (str/split-lines (slurp file)))) 0)]
+    (array-map
+     :path (journal-path path)
+     :records (count records)
+     ;; A torn or hand-edited line does not read as a record.
+     :unreadable-lines (- lines (count records))
+     :entries (vec (take-last (int-flag flags :last (max 1 (count records)) 1) records)))))
+
+(defmethod command "measure" [_ {:keys [positional flags]}]
+  (when (empty? positional)
+    (fail :usage "measure needs at least one plan file."))
+  (let [plans (mapv plan/read-plan positional)]
+    (doseq [p (rest plans)] (same-task! (first plans) p))
+    (when-not (apply distinct? (map plan/plan-hash plans))
+      (fail :same-plan "Two of the plans make the same layout decisions."))
+    (doseq [p plans] (gate! p "plan"))
+    (let [summaries (bench/measure plans (bench-opts flags))]
+      (array-map
+       :task (plan/task-hash (first plans))
+       :entries (:entries (first summaries))
+       :seed (:seed (first summaries))
+       :objective (:objective (first plans))
+       :plans (mapv (fn [path s]
+                      (into (array-map :path (absolute path))
+                            (map (fn [k] [k (get s k)]))
+                            [:hash :cost :time-ns :noise :bytes :build-ms :patterns]))
+                    positional summaries)))))
 
 (defmethod command "verify" [_ {:keys [flags] :as args}]
   (let [path (one-path "verify" args)
@@ -373,7 +478,8 @@
   (let [candidates (step-candidates current)
         timed (filterv :gate-ok candidates)
         [base & summaries] (when (seq timed) (bench/measure (into [current] (map :plan timed)) opts))
-        scored (mapv (fn [c s] (assoc c :cost (:cost s) :verdict (:verdict (bench/verdict (:objective current) (or (:batch-baseline s) base) s))))
+        scored (mapv (fn [c s] (assoc c :cost (:cost s) :bytes (:bytes s) :patterns (pattern-ns s)
+                                      :verdict (:verdict (bench/verdict (:objective current) (or (:batch-baseline s) base) s))))
                      timed summaries)
         best (first (sort-by :cost (filter #(= :better (:verdict %)) scored)))
         confirmed (when best (compare-plans current (:plan best) opts))]
@@ -381,7 +487,9 @@
       (journal-evaluation! plan-path current (:plan best) confirmed opts))
     {:from (plan/plan-hash current)
      :cost (:cost base)
-     :candidates (into (mapv #(select-keys % [:hash :move :cost :verdict]) scored)
+     :bytes (:bytes base)
+     :patterns (some-> base pattern-ns)
+     :candidates (into (mapv #(select-keys % [:hash :move :cost :bytes :verdict :patterns]) scored)
                        (map #(assoc (select-keys % [:hash :move]) :verdict :gate-failed))
                        (remove :gate-ok candidates))
      :chosen (when (= :better (:verdict confirmed))
@@ -390,6 +498,7 @@
                 :why (:why best)
                 :gain (:gain confirmed)
                 :cost (:cost (:candidate confirmed))
+                :measured (select-keys confirmed [:sensitivity :baseline :candidate])
                 :plan (:plan best)})
      :stopped (cond
                 (nil? best) "No neighbor is better."
@@ -409,7 +518,8 @@
             (if (= (count steps) max-steps)
               [current steps]
               (let [step (descend-step path current opts)
-                    steps (conj steps (update step :chosen #(some-> % (dissoc :plan))))]
+                    kept (some->> (:plan (:chosen step)) (keep-candidate! path start))
+                    steps (conj steps (update step :chosen #(some-> % (dissoc :plan) (assoc :path kept))))]
                 (if-let [chosen (:chosen step)]
                   (recur (:plan chosen) steps)
                   [current steps]))))
@@ -433,6 +543,10 @@
        :final (plan/plan-hash final)
        :verdict verdict
        :gain (if overall (:gain overall) (:gain (:chosen (first (filter :chosen steps)))))
+       ;; Start and final from one run: the numbers to report.
+       :measured (when improved?
+                   (or (some-> overall (select-keys [:sensitivity :baseline :candidate]))
+                       (:measured (:chosen (first (filter :chosen steps))))))
        :steps steps
        :stopped (or (:stopped (last steps)) "The step limit was reached.")
        :candidate out
@@ -510,12 +624,14 @@
             (gate! accepted "candidate")
             (publish-acceptance!
              path {:accepted accepted :changed? changed? :source? source?
-                   :record (when changed?
-                             (cond-> {:op :accept :from from :to to
-                                      :at (str (java.time.Instant/now))
-                                      :transaction (str (UUID/randomUUID))}
-                               forced? (assoc :forced (:force flags))
-                               (= :better (:verdict evidence)) (assoc :gain (:gain evidence))))}
+                   ;; A write of the source alone is recorded too: status compares the file with :source-digest.
+                   :record (cond-> {:op (if changed? :accept :emit) :from from :to to
+                                    :at (str (java.time.Instant/now))
+                                    :transaction (str (UUID/randomUUID))}
+                             out (assoc :source-digest (text-digest (emit/source accepted))
+                                        :source-names (source-names accepted))
+                             forced? (assoc :forced (:force flags))
+                             (= :better (:verdict evidence)) (assoc :gain (:gain evidence)))}
              false))
           {:plan path :changed changed? :from from :hash to :forced (boolean forced?)
            :recovered recovered?

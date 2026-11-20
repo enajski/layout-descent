@@ -69,11 +69,15 @@ class ExtensionTest(unittest.TestCase):
         self.assertEqual("layout-descent", extension.alias)
         self.assertEqual(["descent"], [s.name for s in extension.symbols])
         self.assertIn("accept", extension.prompt)
+        for rule in ("not the command line in a shell", "no claim of direction", "numbers of one run", ":notes"):
+            self.assertIn(rule, extension.prompt)
 
     def test_every_tool_has_a_tag_an_activity_and_a_docstring(self):
         tools = [n for n in dir(self.descent) if not n.startswith("_")]
         self.assertEqual(
-            ["accept", "check", "descend", "emit", "evaluate", "facts", "neighbors", "status", "verify"], tools
+            ["accept", "check", "descend", "emit", "evaluate", "facts", "journal", "measure", "neighbors",
+             "status", "verify"],
+            tools,
         )
         for name in tools:
             meta = getattr(self.descent, name).vis_meta
@@ -90,6 +94,16 @@ class ExtensionTest(unittest.TestCase):
         self.assertEqual(["clojure", "-M:cli", "evaluate", "/tmp/c.edn"], command[:4])
         self.assertEqual(["--against", str(ROOT / "plans/p.edn"), "--rounds", "7"], command[4:])
         self.assertEqual(ROOT, run.call_args.kwargs["cwd"])
+        with mock.patch.object(self.module.subprocess, "run", return_value=finished({"ok": True}, 0)) as run:
+            self.descent.facts(["/src"], limit=0, writes=True)
+            self.descent.facts(["/src"])
+            self.descent.measure(["/a.edn", "plans/b.edn"], rounds=5)
+            self.descent.journal("/a.edn", last=3)
+        commands = [call.args[0][2:] for call in run.call_args_list]
+        self.assertEqual(["facts", "/src", "--limit", "0", "--min-depth", "2", "--writes", "true"], commands[0])
+        self.assertEqual(["facts", "/src", "--limit", "5", "--min-depth", "2"], commands[1])
+        self.assertEqual(["measure", "/a.edn", str(ROOT / "plans/b.edn"), "--rounds", "5"], commands[2])
+        self.assertEqual(["journal", "/a.edn", "--last", "3"], commands[3])
 
     def test_a_refusal_is_an_answer_and_a_usage_error_is_an_exception(self):
         refusal = {"ok": False, "error": {"code": "not_measured", "message": "m", "hint": "h"}}
@@ -120,6 +134,12 @@ class ExtensionTest(unittest.TestCase):
             "candidate": {"hash": "b", "patterns": [{"pattern": "p", "ns": 5.0, "weight": 1}]}})
         self.assertEqual(("Candidate is better", "Cost -50.0 %, b against a"), shown.args)
         self.assertFalse(hasattr(shown, "verdict"))
+        measure = self.descent.measure.vis_meta["activity"].render
+        table = measure(phase="success", args=(), kwargs={}, error=None, result={
+            "ok": True, "task": "t", "entries": 9, "plans": [
+                {"hash": "a", "cost": 7.25, "bytes": 64, "patterns": [{"pattern": "p", "ns": 7.25}]}]})
+        self.assertEqual(("Plans measured", "1 plans of task t on 9 entries"), table.args)
+        self.assertEqual((["Hash", "Cost", "Bytes", "p ns"], [["a", "7.2", "64", "7.2"]]), table.content[0].args)
 
     @unittest.skipUnless(shutil.which("clojure"), "needs the clojure command")
     def test_the_real_command_line_answers(self):

@@ -55,3 +55,6 @@
 (defn multi-write [db tenant entity]
   (assoc (get db :scores) tenant 1 entity 2)
   (dissoc (get db :scores) tenant entity))
+
+(defn risky? [db tenant entity limit]
+  (< limit (get-in db [:scores tenant entity :risk] 0.0)))

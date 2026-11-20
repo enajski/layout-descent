@@ -23,17 +23,32 @@ layout decisions (:orders, :serve). The tools are in the `descent` namespace.
 
 The loop:
 1. `descent.facts([src_dir])`: the path shapes of the code. `?` is a :key level, `*` a :scan level.
+   `hidden` counts the shallow shapes and the write sites that the answer leaves out.
 2. Write a plan with one order. `{ROOT}/examples/risk/plan.edn` is a model; `{ROOT}/README.md` has the keys.
+   Put the grounding of the plan in :notes: `accept` keeps :notes and drops comments.
 3. `descent.check(plan)`, then `descent.verify(plan)`.
-4. Get candidates from `descent.neighbors(plan, out_dir)`, or write one. A candidate keeps the task
-   and changes only :orders and :serve.
+4. `descent.descend(plan)` walks the neighbors. For other candidates use
+   `descent.neighbors(plan, out_dir)`, or write one. A candidate keeps the task and changes only
+   :orders and :serve.
 5. `descent.evaluate(candidate, against=plan)`. The verdict is `better`, `worse` or `no-change`.
 6. `descent.accept(candidate, into=plan)` only after a `better` verdict.
+
+For a report: `descent.descend` gives the cost, the bytes and the ns of each pattern for every step
+and writes each chosen plan. `descent.measure([plan, ...])` times plans in one run and writes no
+journal record. `descent.journal(plan)` gives every record.
 
 Rules:
 - `accept` is the only writer of an accepted plan and of its emitted file. Do not edit either.
 - Do not change :workload or :objective to make a candidate win. They are the user's statement of
   the task: ask the user.
+- Call these tools, not the command line in a shell. Each call starts a JVM: seconds for most,
+  under a minute for `descend` on 25,000 entries. The tool waits up to 30 minutes.
+- A `no-change` verdict supports no claim of direction. Do not say which of the two plans is faster.
+- Report the numbers of one run: one `descend`, `evaluate` or `measure` answer for each table.
+- When `sensitivity.depends_on_weights` is true, other :weights can reverse the verdict. Say so,
+  with the smallest `flip_factor`.
+- Say what the plan models when that is not the code the user named. Compare the result with the
+  strongest layout that exists already, not only with the starting plan.
 - An answer with `ok` false has `error.code` and `error.hint`. Follow the hint.
 - Relative paths resolve against {ROOT}. Give absolute paths for files of another project.
 """
@@ -100,9 +115,11 @@ def _summaries(command: str, result: dict[str, Any]) -> tuple[str, str, tuple[An
     if command == "facts":
         shapes = result["shapes"]
         rows = [[" ".join(s["shape"]), str(s["reads"]), str(s["writes"]), str(s["scans"])] for s in shapes[:12]]
+        hidden = result.get("hidden") or {}
         return (
             "Access facts",
-            f"{result['site_count']} sites in {result['files']} files, {len(shapes)} path shapes",
+            f"{result['site_count']} sites in {result['files']} files, {len(shapes)} path shapes shown, "
+            f"{hidden.get('shapes', 0)} hidden",
             (vis.ActivityTable(["Shape", "Reads", "Writes", "Scans"], rows),) if rows else (),
         )
     if command == "check":
@@ -116,6 +133,20 @@ def _summaries(command: str, result: dict[str, Any]) -> tuple[str, str, tuple[An
             f"Plan {result['name']} {result['hash']}",
             f"{len(result['orders'])} orders, emitted file {result['emitted']['state']}",
             (vis.ActivityTable(["Pattern", "Order", "Indexed", "Call"], rows),),
+        )
+    if command == "journal":
+        return ("Journal", f"{len(result['entries'])} of {result['records']} records", ())
+    if command == "measure":
+        plans = result["plans"]
+        ids = [p["pattern"] for p in plans[0]["patterns"]]
+        rows = [
+            [p["hash"], f"{p['cost']:.1f}", str(p["bytes"]), *[f"{row['ns']:.1f}" for row in p["patterns"]]]
+            for p in plans
+        ]
+        return (
+            "Plans measured",
+            f"{len(plans)} plans of task {result['task']} on {result['entries']} entries",
+            (vis.ActivityTable(["Hash", "Cost", "Bytes", *[f"{i} ns" for i in ids]], rows),),
         )
     if command == "verify":
         gate = result["gate"]
@@ -135,11 +166,11 @@ def _summaries(command: str, result: dict[str, Any]) -> tuple[str, str, tuple[An
         )
     if command == "descend":
         taken = [s["chosen"] for s in result["steps"] if s.get("chosen")]
-        rows = [[c["hash"], c["move"]["op"], _percent(c["gain"]), c["why"]] for c in taken]
+        rows = [[c["hash"], c["move"]["op"], _percent(c["gain"]), f"{c['cost']:.1f}", c["why"]] for c in taken]
         return (
             f"Descent is {result['verdict']}",
             f"{len(taken)} steps from {result['start']} to {result['final']}. {result['stopped']}",
-            (vis.ActivityTable(["Hash", "Move", "Gain", "Why"], rows),) if rows else (),
+            (vis.ActivityTable(["Hash", "Move", "Gain", "Cost", "Why"], rows),) if rows else (),
         )
     if command == "accept":
         if not result["changed"]:
@@ -189,14 +220,22 @@ class Descent:
     def facts(
         self,
         paths: Annotated[list[str], "Source directories of the Clojure code to read"],
-        limit: Annotated[int, "Sites listed for each path shape"] = 5,
+        limit: Annotated[int, "Sites listed for each path shape; 0 gives counts only"] = 5,
+        min_depth: Annotated[int, "Fewest computed levels (`?` and `*`) of a shape that is shown"] = 2,
+        writes: Annotated[bool, "Also show the sites that write (assoc, update, ...)"] = False,
     ) -> dict[str, Any]:
-        """Report where a code base reads, writes and scans nested maps, grouped by path shape.
+        """Report where a code base reads and scans nested maps, grouped by path shape.
 
         In a shape, `?` is a key that the code computes (a :key level), `*` a scan of every key
-        (a :scan level) and anything else a constant. Nothing is changed.
+        (a :scan level) and anything else a constant. A lookup inside the function of a scan
+        continues the shape of the scan. File names are relative to `root`. `hidden` counts what
+        `min_depth` and `writes` leave out. Nothing is changed.
         """
-        return run_cli("facts", *[_path(p) for p in paths], *_flags(limit=limit))
+        return run_cli(
+            "facts",
+            *[_path(p) for p in paths],
+            *_flags(limit=limit, min_depth=min_depth, writes="true" if writes else None),
+        )
 
     @vis.method(tag="observation", activity=_activity("check", "Check plan"))
     def check(self, plan: PlanPath) -> dict[str, Any]:
@@ -206,8 +245,37 @@ class Descent:
     @vis.method(tag="observation", activity=_activity("status", "Read plan status"))
     def status(self, plan: PlanPath) -> dict[str, Any]:
         """Describe a plan: the order that serves each pattern, how to call each emitted function,
-        the state of the emitted file and the last journal records."""
+        the state of the emitted file and the last journal records.
+
+        A stale emitted file has `emitted.cause` (`plan-changed`, `plan-renamed`, `file-edited`,
+        `emitter-changed`, or `file-or-emitter-changed` for a journal of an older version) and
+        `emitted.fix`. Follow the fix: for `plan-changed` it is not `accept`."""
         return run_cli("status", _path(plan))
+
+    @vis.method(tag="observation", activity=_activity("journal", "Read journal"))
+    def journal(
+        self,
+        plan: PlanPath,
+        last: Annotated[int | None, "Only the newest records; the default is all"] = None,
+    ) -> dict[str, Any]:
+        """Return the journal of a plan as `entries`: every evaluation with its verdict, costs, bytes
+        and the ns of each pattern, and every acceptance. `unreadable_lines` counts lines that are
+        no record."""
+        return run_cli("journal", _path(plan), *_flags(last=last))
+
+    @vis.method(tag="observation", activity=_activity("measure", "Measure plans", slow=True))
+    def measure(
+        self,
+        plans: Annotated[list[str], "Plan files of one task; one is enough"],
+        rounds: Annotated[int | None, "Timed rounds for each pattern; the default is 15"] = None,
+        warm_ms: Annotated[int | None, "Warm-up for each pattern in milliseconds; the default is 150"] = None,
+    ) -> dict[str, Any]:
+        """Gate plans of one task and time them on the same data, with no verdict and no journal record.
+
+        Each plan gets its cost, estimated bytes, build time and the ns of each pattern. The
+        numbers compare inside one call only. Use it for the table of a report; `evaluate` decides.
+        """
+        return run_cli("measure", *[_path(p) for p in plans], *_flags(rounds=rounds, warm_ms=warm_ms))
 
     @vis.method(tag="verification", activity=_activity("verify", "Run the gate", slow=True, checks=True))
     def verify(
@@ -248,7 +316,9 @@ class Descent:
         """Gate both plans, time them on the same data and return the verdict.
 
         `verdict` is `better`, `worse` or `no-change`. A `better` verdict was confirmed on holdout
-        data. The measurement is appended to `<against>.journal`, where `accept` looks for it.
+        data. `no-change` means that the difference is inside the noise or below :min-gain: it says
+        nothing about direction. `sensitivity` tells whether other :weights can reverse the verdict.
+        The measurement is appended to `<against>.journal`, where `accept` looks for it.
         """
         return run_cli(
             "evaluate", _path(candidate), "--against", _path(against), *_flags(rounds=rounds, warm_ms=warm_ms)
@@ -266,8 +336,10 @@ class Descent:
         """Take the best measured neighbor move, again and again, until none is better.
 
         The plan file is not changed. The result names a `candidate` file to pass to `accept`.
-        This is the mechanical baseline of the search: a candidate that needs two decisions at
-        once is not found.
+        Each step has the cost, the bytes and the ns of each pattern for the plan and every
+        neighbor; a chosen plan is written under `candidates/` beside the plan and named in
+        `chosen.path`. `measured` compares the start and the final plan in one run. This is the
+        mechanical baseline of the search: a candidate that needs two decisions at once is not found.
         """
         return run_cli(
             "descend",

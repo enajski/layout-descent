@@ -13,9 +13,10 @@
 (def formats #{:hash :csf})
 (def folds #{:sum :count})
 (def max-levels 4)
+(def ^:private default-fanout 16)
 
 (def ^:private top-level-keys
-  #{:layout/version :name :levels :leaf :patterns :orders :serve :workload :objective :emit})
+  #{:layout/version :name :notes :levels :leaf :patterns :orders :serve :workload :objective :emit})
 
 (def ^:private reserved-names #{"build" "descriptor" "plan-hash"})
 (def ^:private id-re #"[a-z][a-z0-9-]*")
@@ -127,17 +128,34 @@
 (defn- finite-number? [x]
   (and (number? x) (Double/isFinite (double x))))
 
-(defn- workload-problems [{:keys [fanout fill seed weights] :as workload} ids n]
+(defn- fanout? [fanout n]
+  (and (vector? fanout) (= n (count fanout)) (every? #(and (pos-int? %) (<= % Integer/MAX_VALUE)) fanout)))
+
+(defn- degree?
+  "True when degree has one entry for each level: nil, or a positive integer within the fanout
+  of that level. An unusable fanout is reported on its own and sets no limit here."
+  [degree fanout n]
+  (let [limits (cond (nil? fanout) (repeat n default-fanout)
+                     (fanout? fanout n) fanout
+                     :else (repeat n Integer/MAX_VALUE))]
+    (and (vector? degree)
+         (= n (count degree))
+         (every? true? (map (fn [d limit] (or (nil? d) (and (pos-int? d) (<= d limit)))) degree limits)))))
+
+(defn- workload-problems [{:keys [fanout fill degree seed weights] :as workload} ids n]
   (cond
     (nil? workload) []
     (not (map? workload)) [(problem :bad-workload [:workload] ":workload must be a map.")]
     :else
     (remove nil?
-            [(when-not (or (nil? fanout) (and (vector? fanout) (= n (count fanout)) (every? #(and (pos-int? %) (<= % Integer/MAX_VALUE)) fanout)))
+            [(when-not (or (nil? fanout) (fanout? fanout n))
                (problem :bad-fanout [:workload :fanout] (str ":fanout needs " n " positive integers no larger than " Integer/MAX_VALUE ".")))
              (when-not (or (nil? fill)
                            (and (vector? fill) (= n (count fill)) (every? #(and (number? %) (< 0 % ) (<= % 1)) fill)))
                (problem :bad-fill [:workload :fill] (str ":fill needs " n " numbers in (0, 1].")))
+             (when-not (or (nil? degree) (degree? degree fanout n))
+               (problem :bad-degree [:workload :degree]
+                        (str ":degree needs " n " entries, each nil or a positive integer no larger than the :fanout of its level.")))
              (when-not (or (nil? seed) (int? seed))
                (problem :bad-seed [:workload :seed] ":seed must be an integer."))
              (when-not (or (nil? weights)
@@ -156,6 +174,10 @@
                (problem :bad-ns-per-byte [:objective :ns-per-byte] ":ns-per-byte must be zero or more."))
              (when-not (or (nil? min-gain) (and (finite-number? min-gain) (< 0 (double min-gain) 1)))
                (problem :bad-min-gain [:objective :min-gain] ":min-gain must be between 0 and 1."))])))
+
+(defn- notes-problems [notes]
+  (when-not (or (nil? notes) (string? notes) (and (vector? notes) (every? string? notes)))
+    [(problem :bad-notes [:notes] ":notes must be a string or a vector of strings.")]))
 
 (defn- emit-problems [emit]
   (when-not (or (nil? emit)
@@ -195,6 +217,7 @@
               (vec (concat (serve-problems (:serve plan) ids (count (:orders plan)))
                            (workload-problems (:workload plan) ids n)
                            (objective-problems (:objective plan))
+                           (notes-problems (:notes plan))
                            (emit-problems (:emit plan)))))))))))
 
 ;; ---- normal form, hash ----------------------------------------------------
@@ -207,39 +230,44 @@
     (apply array-map (mapcat (fn [k] [k (get m k)]) (concat front back)))))
 
 (defn normalize
-  "The plan with every default filled and every map in one fixed key order. Assumes a valid plan."
+  "The plan with every default filled and every map in one fixed key order. Assumes a valid plan.
+  The optional keys :notes and :workload :degree are absent unless the plan gives them, so a plan
+  without them keeps its hashes."
   [plan]
   (let [n (count (:levels plan))
         patterns (mapv #(ordered % [:id :bind :fold]) (:patterns plan))
         orders (mapv #(ordered % [:perm :format]) (:orders plan))
         workload (:workload plan)
-        base
-        (array-map
-         :layout/version version
-         :name (symbol (str (:name plan)))
-         :levels (mapv #(ordered % [:id :type]) (:levels plan))
-         :leaf (:leaf plan)
-         :patterns patterns
-         :orders orders
-         :serve (into (sorted-map)
-                      (map (fn [{:keys [id bind]}]
-                             [id (get (:serve plan) id (best-order orders bind))]))
-                      patterns)
-         :workload (array-map
-                    :fanout (or (:fanout workload) (vec (repeat n 16)))
-                    :fill (or (:fill workload) (vec (repeat n 1.0)))
-                    :seed (or (:seed workload) 1)
-                    :weights (into (sorted-map)
-                                   (map (fn [{:keys [id]}] [id (get-in workload [:weights id] 1)]))
-                                   patterns))
-         :objective (array-map
-                     :ns-per-byte (or (get-in plan [:objective :ns-per-byte]) 0.0)
-                     :min-gain (or (get-in plan [:objective :min-gain]) 0.05)))]
-
-    ;; assoc would turn a map of more than eight keys into a hash map and lose the key order.
-    (if-let [emit (:emit plan)]
-      (apply array-map (concat (mapcat identity base) [:emit (ordered emit [:ns :path])]))
-      base)))
+        degree (:degree workload)]
+    ;; One array-map call: assoc would turn a map of more than eight keys into a hash map and lose
+    ;; the key order.
+    (apply array-map
+           (concat
+            [:layout/version version
+             :name (symbol (str (:name plan)))]
+            (when-some [notes (:notes plan)] [:notes notes])
+            [:levels (mapv #(ordered % [:id :type]) (:levels plan))
+             :leaf (:leaf plan)
+             :patterns patterns
+             :orders orders
+             :serve (into (sorted-map)
+                          (map (fn [{:keys [id bind]}]
+                                 [id (get (:serve plan) id (best-order orders bind))]))
+                          patterns)
+             :workload (apply array-map
+                              (concat
+                               [:fanout (or (:fanout workload) (vec (repeat n default-fanout)))
+                                :fill (or (:fill workload) (vec (repeat n 1.0)))]
+                               ;; All nil means what no :degree means, so it has the same normal form.
+                               (when (some some? degree) [:degree degree])
+                               [:seed (or (:seed workload) 1)
+                                :weights (into (sorted-map)
+                                               (map (fn [{:keys [id]}] [id (get-in workload [:weights id] 1)]))
+                                               patterns)]))
+             :objective (array-map
+                         :ns-per-byte (or (get-in plan [:objective :ns-per-byte]) 0.0)
+                         :min-gain (or (get-in plan [:objective :min-gain]) 0.05))]
+            (when-let [emit (:emit plan)] [:emit (ordered emit [:ns :path])])))))
 
 (defn layout-key
   "The part of a normal plan that decides the emitted code."
@@ -287,7 +315,13 @@
             :when (< prefix bound)]
         (problem :partial-index [:patterns id]
                  (str "Pattern " id " fixes " bound " levels, but order " (get (:serve plan) id)
-                      " " (:perm order) " reaches only " prefix " of them before it must scan.")))))))
+                      " " (:perm order) " reaches only " prefix " of them before it must scan."
+                      " A gain from adding an order for this pattern measures the missing index,"
+                      " not the layout format.")))
+      (when (and (< 1 (count orders)) (zero? (double (get-in plan [:objective :ns-per-byte]))))
+        [(problem :memory-not-priced [:objective :ns-per-byte]
+                  (str "Memory is free under this objective, so an extra order can only help."
+                       " Set :ns-per-byte to make memory count."))])))))
 
 ;; ---- search space ---------------------------------------------------------
 
@@ -374,7 +408,7 @@
 ;; ---- files ----------------------------------------------------------------
 
 (defn- render-value [v pad]
-  (if (and (vector? v) (seq v) (every? map? v))
+  (if (and (vector? v) (seq v) (or (every? map? v) (every? string? v)))
     (str "[" (str/join (str "\n" pad) (map pr-str v)) "]")
     (pr-str v)))
 
