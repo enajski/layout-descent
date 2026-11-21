@@ -25,6 +25,9 @@
     :doc "Where a code base reads and scans nested maps, grouped by path shape. Shapes with fewer than --min-depth (2) computed levels and write sites are counted in `hidden`. --limit 0 gives counts only."}
    {:name "flow" :usage "flow <src-dir> --operation <namespace/function> [--lang clj|cljs]" :writes "nothing"
     :doc "Follow named map fields through one Clojure operation and its resolved callees. Steps, uses and unresolved boundaries are static evidence, not timings."}
+   {:name "schema" :usage "schema <src-dir> [--lang clj|cljs] [--limit N] [--entity <id>|loose] [--sites N] [--diagram <file.md|file.mmd>]"
+    :writes "the file of --diagram"
+    :doc "The data model of a code base: entities (records that share keys), the fields that one entity carries into another, and where the traces stopped. --entity adds the records of one entity with their paths and sites. --diagram writes a Mermaid flowchart. Static evidence, not timings."}
    {:name "check" :usage "check <plan>" :writes "nothing"
     :doc "Validate a plan file. Gives its hash, task and warnings, or its problems."}
    {:name "status" :usage "status <plan>" :writes "nothing"
@@ -52,7 +55,7 @@
     :doc "Gate and return source, or write a preview to --out. Only accept writes the configured emitted file."}])
 
 (def ^:private flags-of
-  {"help" #{} "facts" #{:limit :min-depth :writes} "flow" #{:operation :lang} "check" #{} "status" #{} "report" #{} "journal" #{:last}
+  {"help" #{} "facts" #{:limit :min-depth :writes} "flow" #{:operation :lang} "schema" #{:lang :limit :entity :sites :diagram} "check" #{} "status" #{} "report" #{} "journal" #{:last}
    "measure" #{:rounds :warm-ms} "verify" #{:source} "neighbors" #{:out-dir}
    "evaluate" #{:against :rounds :warm-ms} "descend" #{:max-steps :out :rounds :warm-ms}
    "accept" #{:into :force} "emit" #{:out}})
@@ -60,6 +63,7 @@
 (def ^:private hints
   {:usage "Run `help` for the commands and their arguments."
    :flow-operation "Choose a unique top-level defn in the selected language; use --lang clj or --lang cljs for .cljc sources. See unparsed for unreadable files."
+   :schema-entity "Take the id of an entity from `entities` of the same command without --entity, or `loose`. Raise --limit to see more entities."
    :unreadable-plan "The file must hold one EDN map. See examples/risk/plan.edn."
    :invalid-plan "Fix every entry of `problems`; `path` is the place in the plan."
    :task-mismatch "A candidate keeps :levels, :leaf, :patterns and :workload of the plan. Change only :orders and :serve."
@@ -362,6 +366,33 @@
     (let [files ((requiring-resolve 'layout-descent.flow/source-files) dir)]
       (separate! (:save flags) files)
       ((requiring-resolve 'layout-descent.flow/analyze) dir files op lang))))
+
+(defmethod command "schema" [_ {:keys [positional flags]}]
+  (let [[dir] positional
+        lang (some-> (:lang flags) keyword)
+        {:keys [diagram save]} flags]
+    (when (and lang (not (#{:clj :cljs} lang))) (fail :usage "--lang must be clj or cljs."))
+    (when-not (and (= 1 (count positional)) (.isDirectory (io/file ^String dir)))
+      (fail :usage "Usage: schema <src-dir> [--lang clj|cljs] [--limit N] [--entity <id>|loose] [--sites N] [--diagram <file.md|file.mmd>]."))
+    (when (and diagram (not (re-find #"(?i)\.(md|mmd)$" diagram)))
+      (fail :usage "--diagram needs a .md or a .mmd file."))
+    (when (and diagram save (same-file? diagram save))
+      (fail :path-collision "--diagram and --save name the same file."))
+    (let [files ((requiring-resolve 'layout-descent.flow/source-files) dir)
+          _ (separate! save files)
+          answer ((requiring-resolve 'layout-descent.schema/analyze)
+                  dir files lang {:limit (int-flag flags :limit 30 1)
+                                  :entity (:entity flags)
+                                  :sites (int-flag flags :sites 3 0)})]
+      (if diagram
+        (let [chart ((requiring-resolve 'layout-descent.schema/mermaid) answer)
+              target (absolute diagram)]
+          (plan/write-text! target (if (re-find #"(?i)\.md$" diagram)
+                                     (str "# Data model of " (:root answer) "\n\n" (:note answer)
+                                          "\n\n```mermaid\n" chart "\n```\n")
+                                     (str chart "\n")))
+          (assoc answer :diagram target))
+        answer))))
 
 (defmethod command "check" [_ args]
   (let [path (one-path "check" args)

@@ -26,6 +26,13 @@ carriers and uses at source sites. It is step 2 of the loop, and it also answers
 the code when there is no plan. Use the original .cljs sources; `lang="cljs"` selects that side of
 shared .cljc files. Boundaries are unknown, and static counts are not heat.
 
+`descent.schema(src_dir)` gives the data model of a whole source tree: it traces every function and
+groups the values by their keys into entities, with the fields that one entity carries into another.
+Use it first on code you do not know, and to choose the operations for `descent.flow`.
+`entity="e3"` adds the records of one entity with their paths and sites; `diagram=file.md` writes a
+Mermaid flowchart. An entity is a group of records that share keys, not a declared type: say so,
+and name `truncated`, `untraced` and `hidden` when they are not empty.
+
 The loop:
 1. `descent.facts([src_dir])`: the path shapes of the code. `?` is a :key level, `*` a :scan level.
    `[? ?]` is one key that is a vector of computed parts: model each part as a level.
@@ -156,6 +163,24 @@ def _summaries(command: str, result: dict[str, Any]) -> tuple[str, str, tuple[An
             f"{len(result['steps'])} static steps, {len(result['boundaries'])} unresolved boundaries"
             + (" (truncated)" if result["truncated"] else ""),
             (),
+        )
+    if command == "schema":
+        entities = result["entities"]
+        hidden = result.get("hidden") or {}
+        rows = [
+            [e["id"], e["name"], str(e["records"]), str(len(e["keys"])), " ".join(k["key"] for k in e["keys"][:6])]
+            for e in entities[:12]
+        ]
+        stopped = len(result["truncated"]) + len(result["untraced"])
+        return (
+            "Data model",
+            f"{len(entities)} entities shown, {hidden.get('entities', 0)} hidden, {len(result['links'])} links, "
+            f"{result['functions']} functions in {result['files']} files"
+            + (f", {stopped} traces incomplete" if stopped else ""),
+            (
+                *((vis.ActivityTable(["Id", "Entity", "Records", "Keys", "First keys"], rows),) if rows else ()),
+                *((vis.ActivityText(f"Diagram: {result['diagram']}"),) if result.get("diagram") else ()),
+            ),
         )
     if command == "check":
         return ("Plan is valid", f"Plan {result['hash']}, {len(result['warnings'])} warnings", ())
@@ -298,6 +323,35 @@ class Descent:
         """Follow the fields one operation produces, carries and consumes. Steps link to source;
         field uses refer to step ids. Boundaries are unresolved; nothing measures runtime heat."""
         return run_cli("flow", _path(src_dir), *_flags(operation=operation, lang=lang), *_save(save))
+
+    @vis.method(tag="observation", activity=_activity("schema", "Read data model"))
+    def schema(
+        self,
+        src_dir: Annotated[str, "Source directory (.clj, .cljs or .cljc)"],
+        entity: Annotated[str | None, "Id of one entity (e1, ...) whose records are added, or `loose`"] = None,
+        limit: Annotated[int, "Entities shown, the ones with the most records first"] = 30,
+        sites: Annotated[int, "Sites listed for each path of the records of `entity`"] = 3,
+        diagram: Annotated[str | None, "File (.md or .mmd) that receives a Mermaid flowchart of the entities"] = None,
+        lang: Annotated[str | None, "Source platform: clj or cljs. Default: clj on a mixed tree."] = None,
+        save: SavePath = None,
+    ) -> dict[str, Any]:
+        """The data model of a source tree: entities, the links between them and where traces stopped.
+
+        Every function is traced as in `flow`. A record is the origin of a value at one source site
+        (a parameter, a literal, a state, a result); an entity groups the records that share keys.
+        `keys` of an entity count the records that have the key and the sites that read, write, scan
+        or miss it; `levels` are its paths that end at a scan or at a computed key. A `carries` link
+        says that fields of one entity are stored in another, a `holds` link that one entity is
+        stored in a field of another. `hidden` counts the entities beyond `limit` and the records
+        of no entity. `truncated` and `untraced` name the functions whose trace is incomplete.
+        Counts are sites, not executions. Only the file of `diagram` is written.
+        """
+        return run_cli(
+            "schema",
+            _path(src_dir),
+            *_flags(lang=lang, limit=limit, entity=entity, sites=sites, diagram=_path(diagram) if diagram else None),
+            *_save(save),
+        )
 
     @vis.method(tag="observation", activity=_activity("check", "Check plan"))
     def check(self, plan: PlanPath) -> dict[str, Any]:

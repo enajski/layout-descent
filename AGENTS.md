@@ -24,6 +24,8 @@ format, the commands and the rules of the search.
 | `layout-descent.gate` | Load emitted source, capture warnings, compare with the model |
 | `layout-descent.bench` | Measurement and the verdict |
 | `layout-descent.facts` | clj-kondo and edamame analysis of call sites |
+| `layout-descent.flow` | The static trace of one operation: steps, fields, boundaries. `index` and `trace` serve `schema` |
+| `layout-descent.schema` | The data model of a tree from the traces of every function: records, entities (`group`), links, the Mermaid chart |
 | `layout-descent.cli` | The JSON command surface, the journal, `accept` |
 
 ## Invariants
@@ -35,7 +37,7 @@ format, the commands and the rules of the search.
   it only when the layout format changes on purpose.
 - `accept` is the only writer of an accepted plan and of its emitted file. `neighbors`, `descend`
   and `evaluate` write candidates and journal lines only. `measure`, `journal`, `status` and
-  `report` write nothing. `--save` writes one more file with any command, and never a plan,
+  `report` write nothing. `schema` writes only the file of `--diagram`. `--save` writes one more file with any command, and never a plan,
   a journal, an emitted file, a source file that the command reads, or a file below `candidates/`
   or `--out-dir`.
 - A candidate that `descend` builds from measurements, such as a split, comes from a pure function
@@ -50,5 +52,8 @@ format, the commands and the rules of the search.
   own (`bench/timing-loop`), and emitted code calls no large shared method on its hot path:
   `gate_test.clj` pins the cell of a scan. The JIT stops inlining such a method once it has
   compiled it, and the layouts compiled later are slower.
+- A form that `flow` learns to follow needs a function in `test/fixtures/forms` and an assertion in
+  `flow_test.clj`. The numbers of `test/fixtures/flow` are pinned by `schema_test.clj`: do not add
+  functions there.
 - A new format needs a builder in `rt`, an emitter in `emit`, an entry in `plan/formats`, and no
   change in `model`.

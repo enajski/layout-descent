@@ -142,6 +142,7 @@ goes to stdout.
 | --- | --- | --- |
 | `facts <src-dir>... [--limit N] [--min-depth N] [--writes true\|false]` | nothing | Path shapes of `get-in`, `get`, `reduce-kv` and others, with sites |
 | `flow <src-dir> --operation <namespace/function> [--lang clj\|cljs]` | nothing | Named fields an operation produces, carries or uses; source sites and unresolved boundaries |
+| `schema <src-dir> [--lang clj\|cljs] [--limit N] [--entity <id>\|loose] [--sites N] [--diagram <file.md\|file.mmd>]` | the file of `--diagram` | The data model of a code base: entities, the fields that one carries into another, and where the traces stopped |
 | `check <plan>` | nothing | Validate; hash, task, warnings or problems |
 | `status <plan>` | nothing | Workload, orders, patterns, calls, emitted file state and the cause when it is stale, last journal records |
 | `report <plan>` | nothing | The fields of `status`, the plan text, the emitted source, every journal record and the kept candidates in one answer |
@@ -272,21 +273,84 @@ Two reads or writes with this shape need not touch the same tile. For `[id value
 A `state_read` snapshot is open: `swap!` traces the update function from it and `state_write` identifies
 the possible result. This does not link a later `@state` to that write, count retries or trace watchers.
 
-This bounded **static** slice follows fixed-arity calls, `let`, simple `:keys` and positional vector
-bindings, `->`/`->>`/`as->`, possible `case`/`and`/`or` paths, map access/update functions (including
-when passed to `swap!`), and single-collection `map`/`mapv`. A field first read from input is not
-proof of its business producer. Dynamic keys, unresolved callbacks, JS interop,
-unsupported macros, external calls (including serialization) and recursion are `boundaries`, not
-proof that a value is unused. Check `unparsed` and `truncated` (2,048 steps; call depth 32 ends at
+This bounded **static** slice follows:
+
+- fixed-arity calls, `let`, simple `:keys` and positional vector bindings, and a `def` whose value is
+  a literal map, vector or set;
+- the threads `->`, `->>`, `as->`, `some->`, `some->>`, `cond->` and `cond->>`;
+- every possible path of `if`, `if-not`, `when`, `when-not`, `if-let`, `when-let`, `if-some`, `when-some`,
+  `cond`, `case`, `and`, `or` and `try` with its `catch` and `finally`;
+- map access and update functions (including when passed to `swap!`), `merge`, two-argument `into`,
+  `dissoc`, `contains?`, and `select-keys` with a literal vector of keys;
+- one collection through `map`, `mapv`, `keep`, `mapcat`, `filter`, `filterv`, `remove`, `sort-by`,
+  `take-while`, `drop-while`, `some`, `every?`, `not-any?`, `not-every?`, `reduce`, `doseq` and
+  `for` (with `:let`, `:when` and `:while`): the function is traced once for an element that
+  stands for all of them;
+- the calls that keep the elements (`seq`, `vec`, `set`, `sort`, `reverse`, `distinct`, `rest`,
+  `take`, `drop`, `vals` and others) and the ones that pick one (`first`, `second`, `last`, `peek`).
+
+A field first read from input is not proof of its business producer. Dynamic keys, unresolved
+callbacks, JS interop, `loop`/`recur`, `doto`, other unsupported macros, variadic calls, `:or` and
+`& rest` bindings, external calls (including serialization), a caught exception and recursion are
+`boundaries`, not proof that a value is unused. Check `unparsed` and `truncated` (2,048 steps; call depth 32 ends at
 a boundary). Counts are source evidence, **not** hotness, bytes or a license to drop a field. No
 plan, accepted layout, journal or source is changed. `--save` optionally writes the graph as JSON.
+
+## See the data model
+
+`schema` traces every function of a source directory as `flow` does and puts the results together.
+It does not load the application.
+
+```sh
+clojure -M:cli schema test/fixtures/flow
+clojure -M:cli schema src --limit 12 --diagram /tmp/model.md   # a Mermaid flowchart
+clojure -M:cli schema src --entity e2 --save /tmp/e2.json      # the records of one entity
+```
+
+- A **record** is the origin of a value at one source site: a parameter of a function (`param`), a
+  map that the code builds (`built`), an atom (`state`), a literal `def` (`var`) or the result of a
+  call that the trace cannot enter (`result`). The paths that the code reads from it and writes to it
+  are its fields.
+- An **entity** is a group of records that share keys. The record with the most keys comes first; a
+  record joins the entity with which it shares the most keys, when these are two or more and at least
+  60 % of its own. An entity is named by the most frequent parameter name of its records. Its `keys`
+  count the records that have the key and the sites that read, write, scan or miss it (a `miss` reads
+  a key that the map at that site cannot have). Its `levels` are the paths that end at a scan (`*`)
+  or at a computed key (`?`): the candidates for the `:levels` of a plan.
+- A **link** with kind `carries` says that fields of one entity are stored in another, with up to
+  three examples: in the fixture, `:price` of `listing` becomes `:sale-price` of the map that
+  `shop.catalog/capture` builds. Kind `holds` says that one entity is stored in a field of another.
+- `--entity e2` adds `records` (with each path, its counts and up to `--sites` sites) and
+  `record_links`. `--entity loose` gives the records of no entity. `hidden` counts the entities
+  beyond `--limit` (default 30) and the loose records.
+- `--diagram` writes the entities and links of the answer as a Mermaid flowchart: a `.mmd` file holds
+  the chart, a `.md` file holds it in a fenced block that GitHub and Obsidian draw. A node lists up
+  to 12 keys. A solid arrow carries fields, a dotted arrow holds an entity.
+
+```mermaid
+flowchart LR
+  e1["<b>shop.catalog/capture</b> (1 record)<br/>:currency<br/>:origin<br/>:sale-price"]
+  e2["<b>shop.order/only-one</b> (1 record)<br/>:absent<br/>:x<br/>:y"]
+  e3["<b>cold</b> (1 record)<br/>:from-cold<br/>:other"]
+  e4["<b>listing</b> (1 record)<br/>:currency<br/>:price"]
+  e5["<b>shop.order/settle</b> (1 record)<br/>:amount<br/>:receipt-price"]
+  e3 -->|"2 fields"| e2
+  e4 -->|"2 fields"| e1
+  e4 -->|"1 field"| e5
+```
+
+An entity is evidence about shared keys, not a declared type: two maps with the same keys are one
+entity, and one map that the code reads in two disjoint parts can be two. Check the grouping with
+`--entity` before you act on it. `truncated` names the functions whose trace reached the step limit
+and `untraced` the ones with no trace; `boundaries` counts where the traces stopped, by reason and
+by call, which is also the list of what a longer trace would need. Counts are sites, not executions.
 
 ## Vis extension
 
 `.vis/extensions/layout_descent_tools.py` registers the namespace `descent` with one tool for each
-command: `descent.facts`, `flow`, `check`, `status`, `report`, `journal`, `measure`, `verify`, `neighbors`,
-`evaluate`, `descend`, `accept` and `emit`. `flow`, `report`, `journal`, `measure`, `evaluate` and `descend`
-take `save`. Each tool runs the command line and returns its answer as a dict. A refusal
+command: `descent.facts`, `flow`, `schema`, `check`, `status`, `report`, `journal`, `measure`, `verify`,
+`neighbors`, `evaluate`, `descend`, `accept` and `emit`. `flow`, `schema`, `report`, `journal`, `measure`,
+`evaluate` and `descend` take `save`. Each tool runs the command line and returns its answer as a dict. A refusal
 is a returned answer with `ok` false; only a usage or internal error raises. Vis loads the file
 when this project is in the workspace; reload Vis after a change.
 
@@ -339,7 +403,7 @@ Commit the plan and the emitted file together. `status` says `stale` when they d
 ## Tests
 
 ```sh
-clojure -M:cli:test              # plan, gen, gate, bench, facts, command line
+clojure -M:cli:test              # plan, gen, gate, bench, facts, flow, schema, command line
 clojure -M:cli:test facts plan   # only the named test namespaces
 python3 test/extension_test.py   # the Vis entry file, with a stub of the SDK
 ```
@@ -351,6 +415,8 @@ python3 test/extension_test.py   # the Vis entry file, with a stub of the SDK
 - The workload is synthetic: fanout, fill or degree, seed and weights. It is your statement of
   the task, not a replay of production traffic or of real data.
 - Call sites are not rewritten for you. `facts` gives the sites and `status` the calls.
+- `flow` and `schema` read source text and never run it. They give no frequency, time or size, and
+  an entity of `schema` is a group of records with shared keys, not a type that the code declares.
 - Plans are measured and emitted for the JVM only.
 - The time of a pattern is that of the fastest of three compilations in one process. The JIT can
   compile one layout to code of another speed in another compilation: a CSF scan took 21 to 31 ns

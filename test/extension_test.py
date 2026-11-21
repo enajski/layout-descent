@@ -78,7 +78,7 @@ class ExtensionTest(unittest.TestCase):
         tools = [n for n in dir(self.descent) if not n.startswith("_")]
         self.assertEqual(
             ["accept", "check", "descend", "emit", "evaluate", "facts", "flow", "journal", "measure", "neighbors",
-             "report", "status", "verify"],
+             "report", "schema", "status", "verify"],
             tools,
         )
         for name in tools:
@@ -105,6 +105,7 @@ class ExtensionTest(unittest.TestCase):
             self.descent.descend("/a.edn", save="out/trace.json")
             self.descent.flow("src", "orders/settle", save="out/flow.json")
             self.descent.flow("/src", "shared/act", lang="cljs")
+            self.descent.schema("src", entity="e2", diagram="out/model.md")
         commands = [call.args[0][2:] for call in run.call_args_list]
         self.assertEqual(["facts", "/src", "--limit", "0", "--min-depth", "2", "--writes", "true"], commands[0])
         self.assertEqual(["facts", "/src", "--limit", "5", "--min-depth", "2"], commands[1])
@@ -117,6 +118,8 @@ class ExtensionTest(unittest.TestCase):
         self.assertEqual(["flow", str(ROOT / "src"), "--operation", "orders/settle", "--save", str(ROOT / "out/flow.json")],
                          commands[6])
         self.assertEqual(["flow", "/src", "--operation", "shared/act", "--lang", "cljs"], commands[7])
+        self.assertEqual(["schema", str(ROOT / "src"), "--limit", "30", "--entity", "e2", "--sites", "3",
+                          "--diagram", str(ROOT / "out/model.md")], commands[8])
 
     def test_a_refusal_is_an_answer_and_a_usage_error_is_an_exception(self):
         refusal = {"ok": False, "error": {"code": "not_measured", "message": "m", "hint": "h"}}
@@ -164,6 +167,17 @@ class ExtensionTest(unittest.TestCase):
             "ok": True, "site_count": 3, "files": 1, "shapes": [], "hidden": {"shapes": 2},
             "warnings": [{"code": "clojurescript-sources", "message": "JVM only."}], "hint": "Lower min-depth."})
         self.assertEqual(["JVM only.", "Lower min-depth."], [c.args[0] for c in empty.content])
+        schema = self.descent.schema.vis_meta["activity"].render
+        model = schema(phase="success", args=(), kwargs={}, error=None, result={
+            "ok": True, "functions": 4, "files": 2, "truncated": ["a/b"], "untraced": [], "links": [{}],
+            "hidden": {"entities": 3, "loose_records": 1}, "diagram": "/tmp/m.md",
+            "entities": [{"id": "e1", "name": "order", "records": 2, "keys": [{"key": ":id"}, {"key": ":total"}]}]})
+        self.assertEqual(
+            ("Data model", "1 entities shown, 3 hidden, 1 links, 4 functions in 2 files, 1 traces incomplete"),
+            model.args)
+        self.assertEqual((["Id", "Entity", "Records", "Keys", "First keys"], [["e1", "order", "2", "2", ":id :total"]]),
+                         model.content[0].args)
+        self.assertEqual("Diagram: /tmp/m.md", model.content[1].args[0])
 
     @unittest.skipUnless(shutil.which("clojure"), "needs the clojure command")
     def test_the_real_command_line_answers(self):
@@ -174,6 +188,11 @@ class ExtensionTest(unittest.TestCase):
         render = self.descent.status.vis_meta["activity"].render
         self.assertEqual("Plan risk e471a80f71f4",
                          render(phase="success", args=(), kwargs={}, result=status, error=None).args[0])
+        model = self.descent.schema("test/fixtures/forms")
+        self.assertEqual(["order", "ticket"], [e["name"] for e in model["entities"][:2]])
+        shown = self.descent.schema.vis_meta["activity"].render(
+            phase="success", args=(), kwargs={}, result=model, error=None)
+        self.assertEqual("8 entities shown, 0 hidden, 0 links, 12 functions in 1 files", shown.args[1])
 
 
 if __name__ == "__main__":

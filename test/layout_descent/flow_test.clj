@@ -122,3 +122,59 @@
                                        [:answer "error" "code"])))
       (is (= source (slurp file)))
       (finally (io/delete-file cljs) (io/delete-file bad) (io/delete-file file) (io/delete-file dir)))))
+
+(defn- form [op]
+  (flow/analyze "test/fixtures/forms" (flow/source-files "test/fixtures/forms") (str "desk.forms/" op)))
+
+(defn- vias [result key kind] (map :via (uses result key kind)))
+
+(defn- reasons [result] (map (comp :reason (:steps result)) (:boundaries result)))
+
+(deftest branches-bind-and-choose
+  (let [r (form "guarded")]
+    (is (empty? (:boundaries r)))
+    (is (= ["condition"] (vias r ":line" :consume)))
+    (is (= [":qty"] (map :field (uses r ":line" :read))))
+    (is (= [["clojure.core/if-let"] ["clojure.core/if-let"]] [(vias r ":qty" :choice) (vias r ":fallback" :choice)])))
+  (let [r (form "routed")]
+    (is (empty? (:boundaries r)))
+    (is (= [["condition"] ["condition"]] [(vias r ":urgent?" :consume) (vias r ":stale?" :consume)]))
+    (is (every? #(= ["clojure.core/cond"] (vias r % :choice)) [":owner" ":queue" ":id"])))
+  (let [r (form "enriched")]
+    (is (empty? (:boundaries r)))
+    (is (= [":owner"] (map :field (uses r ":name" :carry))))
+    (is (= ["clojure.core/cond->"] (vias r ":owner" :choice))))
+  (let [r (form "safe")]
+    (is (= [:caught :opaque-call] (reasons r)))
+    (is (= ["try"] (vias r ":body" :choice)))
+    (is (= 1 (count (fields r ":trace"))) "the finally body is read and not returned")
+    (is (empty? (vias r ":trace" :return)))))
+
+(deftest collections-keep-their-elements
+  (let [r (form "totals")]
+    (is (empty? (:boundaries r)))
+    (is (= ["clojure.core/+"] (vias r ":amount" :consume))))
+  (let [r (form "open-ids")]
+    (is (empty? (:boundaries r)))
+    (is (= ["condition"] (vias r ":open?" :consume)))
+    (is (= ["clojure.core/for"] (vias r ":id" :collect))))
+  (let [r (form "paid")]
+    (is (empty? (:boundaries r)))
+    (is (= ["clojure.core/filter"] (vias r ":paid?" :consume)))
+    (is (= ["clojure.core/map"] (vias r ":total" :collect))))
+  (let [r (form "head") pick (first (filter #(= :project (:kind %)) (:steps r)))]
+    (is (empty? (:boundaries r)))
+    (is (= [:open nil] ((juxt :resolution :index) pick)))
+    (is (= ["desk.forms/head"] (vias r ":id" :return))))
+  (let [r (form "summary")]
+    (is (empty? (:boundaries r)))
+    (is (= [:read :carry :read :carry] (map #(get-in r [:steps (:at %) :kind]) (:fields r))))
+    (is (= #{"clojure.core/select-keys"} (set (vias r ":total" :assemble)))))
+  (let [r (form "merged")]
+    (is (empty? (:boundaries r)))
+    (is (= ["desk.forms/merged"] (vias r ":x" :return))))
+  (let [r (form "configured")]
+    (is (empty? (:boundaries r)) "a literal def is a known value")
+    (is (= [:known-slot] (map :resolution (uses r ":mode" :read))))
+    (is (empty? (uses r ":retries" :read))))
+  (is (= [:unsupported-macro] (reasons (form "looped")))))

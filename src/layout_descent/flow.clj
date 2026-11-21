@@ -41,6 +41,9 @@
         selected (filter #(or (nil? (file-lang %)) (= lang (file-lang %))) files)
         definitions (into {} (for [{:keys [filename row col] :as d} defs :when (= lang (platform d))]
                                [[filename row col] (qualified d)]))
+        constants (into {} (for [{:keys [filename row col] :as d} (:var-definitions analysis)
+                                 :when (and (#{'def 'defonce} (core-name (:defined-by d))) (= lang (platform d)))]
+                             [[filename row col] (qualified d)]))
         calls (into {} (for [{:keys [filename name-row name-col to name macro] :as u} (:var-usages analysis)
                              :when (and (= lang (platform u)) to name name-row name-col)]
                          [[(relative filename) name-row name-col] [(symbol (str to) (str name)) macro]]))]
@@ -48,12 +51,18 @@
               (let [path (relative file)]
                 (try
                   (reduce (fn [index form]
-                            (if-let [op (definitions (into [file] (pos form)))]
-                              (update-in index [:defs op] (fnil conj []) {:op op :file path :form form})
-                              index))
+                            (let [at (into [file] (pos form))
+                                  init (when (and (seq? form) (<= 3 (count form))) (last form))]
+                              (cond (definitions at)
+                                    (update-in index [:defs (definitions at)] (fnil conj [])
+                                               {:op (definitions at) :file path :form form})
+                                    ;; A def of a literal collection is a value that a trace can read.
+                                    (and (constants at) (or (map? init) (vector? init) (set? init)))
+                                    (assoc-in index [:vars (constants at)] {:op (constants at) :file path :form init})
+                                    :else index)))
                           index (edamame/parse-string-all (slurp file) (assoc reader-options :features #{lang})))
                   (catch Exception _ (update index :unparsed conj path)))))
-            {:defs {} :calls calls :lang lang :file-count (count selected) :unparsed []} selected)))
+            {:defs {} :vars {} :calls calls :lang lang :file-count (count selected) :unparsed []} selected)))
 
 ;; A value has an optional producing step, known slots, and the ids of named facts it carries.
 ;; Consuming a value starts a NEW value: dependencies remain edges, not aliases of the result.
@@ -113,7 +122,7 @@
   (let [closed (or (:closed m) (and (contains? m :literal) (nil? (:literal m))))
         base (or (:base m) (when-not closed m))
         parts (cond-> (vec (vals slots)) base (conj base))]
-    (assoc (step! ctx form :assemble via parts) :slots slots :closed closed :base base :path (:path m)
+    (assoc (step! ctx form :assemble via parts {::onto (:id m)}) :slots slots :closed closed :base base :path (:path m)
            :tracks (tracks parts))))
 
 (defn- read-key [ctx site via m k]
@@ -249,20 +258,104 @@
         (and (keyword? (:literal f)) (= 1 (count args))) (read-field ctx site (first args) (:literal f))
         :else (boundary! ctx site :indirect-call via (cons f args))))
 
+(declare each)
+
 (defn- map-call [ctx form via [f coll]]
-  (let [item (:element coll)
-        ;; Reading a collection is not reading its attributes as fields of each item.
-        elem (merge item (step! ctx form :iterate via [(or item coll)]))
-        out (apply-value ctx form via f [elem])]
+  (let [out (apply-value ctx form via f [(each ctx form via coll)])]
     (assoc (step! ctx form :collect via [out]) :element out :tracks (:tracks out))))
 
+;; Functions of one collection whose result holds the same elements.
+(def ^:private copies '#{seq sort vec set reverse distinct rest next butlast doall not-empty shuffle vals})
+
+;; Functions of [f coll] that call f with an element and return the same elements.
+(def ^:private tests '#{filter filterv remove take-while drop-while sort-by})
+
+;; Functions of [n coll] whose result holds the same elements.
+(def ^:private slices '#{take drop take-last drop-last take-nth})
+
+(def ^:private picks '#{first second last peek rand-nth})
+
+(defn- thread-step [ctx form v expr last?]
+  (let [[f & args] (if (seq? expr) expr [expr])
+        tmp (gensym "thread")
+        call (if last? (concat [f] args [tmp]) (list* f tmp args))]
+    (trace-expr (assoc-in ctx [:env tmp] v) (with-meta (apply list call) (or (meta expr) (meta form))))))
+
 (defn- thread-body [ctx form last?]
-  (reduce (fn [v expr]
-            (let [[f & args] (if (seq? expr) expr [expr])
-                  tmp (gensym "thread")
-                  call (if last? (concat [f] args [tmp]) (list* f tmp args))]
-              (trace-expr (assoc-in ctx [:env tmp] v) (with-meta (apply list call) (or (meta expr) (meta form))))))
-          (trace-expr ctx (second form)) (nnext form)))
+  (reduce #(thread-step ctx form %1 %2 last?) (trace-expr ctx (second form)) (nnext form)))
+
+(defn- conditional-thread
+  "cond-> and cond->>: every step may run or not, so its result is a choice with the value before."
+  [ctx form via last?]
+  (let [[init & clauses] (rest form)]
+    (reduce (fn [v [test expr]]
+              (let [control (step! ctx test :consume "condition" [(trace-expr ctx test)])]
+                (choice ctx expr via [(thread-step ctx form v expr last?) v] control)))
+            (trace-expr ctx init) (partition 2 clauses))))
+
+(defn- bind-test
+  "if-let, when-let, if-some and when-some: the branch that sees the binding, or the other one."
+  [ctx form via two-sided?]
+  (let [[[binding expr] & branches] (rest form)
+        v (trace-expr ctx expr)
+        control (step! ctx expr :consume "condition" [v])
+        inner (bind-value ctx binding v)]
+    (cond (nil? inner) (boundary! ctx binding :unsupported-binding via [v])
+          two-sided? (choice ctx form via [(trace-expr inner (first branches))
+                                           (if (next branches) (trace-expr ctx (second branches)) {})] control)
+          :else (choice ctx form via [(body inner branches) {}] control))))
+
+(defn- try-body
+  "The value of a try: its body or one of its handlers. A caught exception is an unknown value."
+  [ctx form]
+  (let [clause? #(and (seq? %) ('#{catch finally} (first %)))
+        main (or (body ctx (remove clause? (rest form))) {})
+        handlers (vec (for [[kind & more :as clause] (filter clause? (rest form))
+                            :let [[_ sym & forms] more
+                                  v (if (= 'catch kind)
+                                      (body (assoc-in ctx [:env sym] (boundary! ctx clause :caught "catch" [])) forms)
+                                      (do (body ctx more) nil))]
+                            :when v]
+                        v))]
+    (if (seq handlers) (choice ctx form "try" (into [main] handlers) nil) main)))
+
+(defn- each
+  "The element of a collection: the known one, or a step that stands for every element."
+  [ctx form via coll]
+  (let [item (:element coll)]
+    ;; Reading a collection is not reading its attributes as fields of each item.
+    (merge item (step! ctx form :iterate via [(or item coll)] {::element (some? item)}))))
+
+(defn- same-items
+  "A collection with the elements of another one: sorted, filtered, shortened or copied."
+  [ctx form via coll]
+  (merge (select-keys coll [:element :tracks]) (step! ctx form :collect via [coll] {::same true})))
+
+(defn- pick
+  "One element of a collection, such as first or last."
+  [ctx form via coll]
+  (let [item (:element coll)]
+    (merge (or item {:alias true})
+           (step! ctx form :project via [(or item coll)]
+                  {:container (:id coll) :resolution (if item :known-slot :open)}))))
+
+(defn- comprehension
+  "doseq and for: every binding is an element of its collection. :let binds, :when and :while test."
+  [ctx form via collect?]
+  (let [[bindings & forms] (rest form)
+        inner (reduce (fn [c [b expr]]
+                        (when c
+                          (cond (= :let b) (reduce (fn [c [k e]] (when c (bind-value c k (trace-expr c e))))
+                                                   c (partition 2 expr))
+                                (keyword? b) (do (step! c expr :consume "condition" [(trace-expr c expr)]) c)
+                                :else (bind-value c b (each c expr via (trace-expr c expr))))))
+                      ctx (partition 2 bindings))]
+    (if (nil? inner)
+      (boundary! ctx form :unsupported-binding via [])
+      (let [out (body inner forms)]
+        (if collect?
+          (assoc (step! ctx form :collect via [out]) :element out :tracks (:tracks out))
+          {:literal nil})))))
 
 (defn- unique-target [ctx q]
   (let [defs (get (:defs ctx) q)] (when (= 1 (count defs)) (first defs))))
@@ -291,10 +384,21 @@
       (keyword? f) (let [[m default] (vs)] (lookup ctx form "lookup" m [{:literal f}] default))
       (= 'quote f) (if (coll? (second form)) (boundary! ctx form :quoted-data f []) {:literal (second form)})
       (= 'do f) (body ctx args)
-      (or (= 'if f) (#{'when 'when-not} core))
+      (or (= 'if f) (#{'if-not 'when 'when-not} core))
       (let [[test & branches] args
             control (step! ctx test :consume "condition" [(ev test)])]
-        (choice ctx form f (if (= 'if f) (mapv ev branches) [(body ctx branches) {}]) control))
+        (choice ctx form f (if (or (= 'if f) (= 'if-not core)) (mapv ev branches) [(body ctx branches) {}]) control))
+      (#{'if-let 'if-some} core) (bind-test ctx form via true)
+      (#{'when-let 'when-some} core) (bind-test ctx form via false)
+      (= 'cond core)
+      (let [branches (mapv (fn [[test expr]]
+                             [(when-not (keyword? test) (step! ctx test :consume "condition" [(ev test)])) (ev expr)])
+                           (partition 2 args))]
+        (choice ctx form via (mapv second branches) (first (keep first branches))))
+      (#{'cond-> 'cond->>} core) (conditional-thread ctx form via (= 'cond->> core))
+      (or (= 'throw f) (= 'throw core)) (step! ctx form :consume "throw" (vs))
+      (= 'try f) (try-body ctx form)
+      (#{'doseq 'for} core) (comprehension ctx form via (= 'for core))
       (= 'case core)
       (let [[test & clauses] args
             c (step! ctx test :consume "case selector" [(ev test)])
@@ -305,20 +409,63 @@
                        (reduce #(trace-expr (assoc-in ctx [:env sym] %1) %2) (ev init) exprs))
       (or (= 'fn core) (= 'fn* f)) {:fn {:op (:op ctx) :file (:file ctx) :form form :closure (:env ctx)}}
       (= 'let core) (let-body ctx form)
-      (#{'-> '->>} core) (thread-body ctx form (= '->> core))
+      (#{'-> '->> 'some-> 'some->>} core) (thread-body ctx form (boolean (#{'->> 'some->>} core)))
       (builtins core) (apply-builtin ctx form q (vs))
-      (and (#{'map 'mapv} core) (= 2 (count args))) (map-call ctx form via (vs))
+      (and (#{'map 'mapv 'keep} core) (= 2 (count args))) (map-call ctx form via (vs))
+      (and (tests core) (= 2 (count args)))
+      (let [[f coll] (vs)]
+        (step! ctx form :consume via [(apply-value ctx form via f [(each ctx form via coll)])])
+        (same-items ctx form via coll))
+      (and (= 'mapcat core) (= 2 (count args)))
+      (let [[f coll] (vs)
+            out (apply-value ctx form via f [(each ctx form via coll)])]
+        (cond-> (assoc (step! ctx form :collect via [out]) :tracks (:tracks out))
+          (:element out) (assoc :element (:element out))))
+      (and (= 'some core) (= 2 (count args)))
+      (let [[f coll] (vs)] (pass! ctx form :pass via (apply-value ctx form via f [(each ctx form via coll)])))
+      (and (#{'every? 'not-any? 'not-every?} core) (= 2 (count args)))
+      (let [[f coll] (vs)] (step! ctx form :consume via [(apply-value ctx form via f [(each ctx form via coll)])]))
+      (and (= 'reduce core) (#{2 3} (count args)))
+      (let [[f a b] (vs)
+            [init coll] (if b [a b] [nil a])
+            item (each ctx form via coll)
+            ;; The function runs once here: its accumulator is the start value, not an earlier result.
+            out (apply-value ctx form via f [(or init item) item])]
+        (choice ctx form via (cond-> [out] init (conj init)) nil))
+      (and (#{'merge 'into} core) (seq args) (<= (count args) (if (= 'into core) 2 64)))
+      (choice ctx form via (vs) nil)
+      (and (= 'select-keys core) (= 2 (count args)) (vector? (second args)) (every? named-key? (second args)))
+      (let [m (ev (first args))]
+        (assemble ctx form via {:closed true}
+                  (into {} (for [k (second args)] [k (put-field ctx form k (read-field ctx form m k))]))))
+      (and (= 'dissoc core) (seq args))
+      (let [[m & ks] (vs)]
+        (pass! ctx form :pass via (cond-> m (:slots m) (update :slots #(apply dissoc % (keep :literal ks))))))
+      (and (= 'contains? core) (= 2 (count args)))
+      (let [[m k] (vs)] (step! ctx form :consume via [(read-key ctx form via m k)]))
+      (and (picks core) (= 1 (count args)))
+      (let [[coll] (vs)
+            index ({'first 0 'second 1} core)]
+        (if (and index (:items coll)) (project ctx form coll index) (pick ctx form via coll)))
+      (and (slices core) (= 2 (count args))) (same-items ctx form via (second (vs)))
       (= 'identity core) (pass! ctx form :pass via (ev (first args)))
       (= 'count core) (step! ctx form :inspect via (vs))
-      (and (#{'sort 'vec} core) (= 1 (count args)))
-      (let [v (ev (first args))]
-        (merge (select-keys v [:element :tracks]) (step! ctx form :collect via [v])))
+      (and (copies core) (= 1 (count args))) (same-items ctx form via (ev (first args)))
       ;; Mentioned locals may cross an unexpanded macro; this is not a claim of consumption.
       macro? (boundary! ctx form :unsupported-macro via
                         (keep (:env ctx) (distinct (filter symbol? (tree-seq coll? seq args)))))
       (unique-target ctx q) (invoke ctx form (unique-target ctx q) (vs))
       :else (boundary! ctx form (if (symbol? f) :opaque-call :indirect-call) via
                        (cond-> (vs) (not (symbol? f)) (conj (ev f)))))))
+
+(defn- constant
+  "The value of a def whose init is a literal collection. One trace reads the literal once."
+  [ctx q]
+  (or (get @(:constants ctx) q)
+      (let [{:keys [op file form]} (get (:vars ctx) q)
+            v (trace-expr (assoc ctx :file file :op op :at form :env {}) form)]
+        (vswap! (:constants ctx) assoc q v)
+        v)))
 
 (defn- trace-expr [ctx form]
   (let [ctx (if (:row (meta form)) (assoc ctx :at form) ctx)]
@@ -328,6 +475,7 @@
         (cond (contains? (:env ctx) form) (get (:env ctx) form)
               (unique-target ctx q) {:fn (unique-target ctx q)}
               (builtins (core-name q)) {:builtin q}
+              (get (:vars ctx) q) (constant ctx q)
               :else (boundary! ctx form :external-value (or q form) [])))
       (seq? form) (call ctx form)
       (map? form) (if (every? named-key? (keys form))
@@ -341,30 +489,45 @@
       (tagged-literal? form) (boundary! ctx form :tagged-literal (:tag form) [])
       :else {:literal form})))
 
-(defn- report [ctx dir op truncated?]
-  (let [steps @(:log ctx)
-        uses (reduce (fn [m s]
+(defn- report [ctx dir op steps truncated?]
+  (let [uses (reduce (fn [m s]
                        (reduce #(update-in %1 [%2 (:kind s)] (fnil conj []) (:id s)) m (::tracks s))) {} steps)
         fields (for [s steps :when (::introduces s)]
                  {:at (:id s) :field (:field s) :uses (get uses (:id s) {})})]
     {:operation (str op) :root (str (.getCanonicalFile (io/file dir))) :scope :static
      :language (:lang ctx) :files (:file-count ctx) :unparsed (:unparsed ctx) :truncated truncated?
      :note "Possible source paths, not execution counts, allocation sizes or proof of safe removal."
-     :fields (vec fields) :steps (mapv #(dissoc % ::introduces ::tracks) steps)
+     :fields (vec fields) :steps (mapv #(dissoc % ::introduces ::tracks ::onto ::element ::same) steps)
      :boundaries (mapv :id (filter #(= :boundary (:kind %)) steps))}))
+
+(defn index
+  "The definitions and the resolved calls of a source tree in one language, for any number of
+  traces. entry, a qualified symbol or nil, chooses the language when lang is nil."
+  [dir files entry lang]
+  (source-index dir files entry lang))
+
+(defn trace
+  "The steps of one operation as {:steps [...] :truncated bool}, or nil when op is not one
+  top-level defn of the index. A step keeps the keys that the answer of analyze leaves out:
+  ::tracks, ::introduces, ::onto (the value that an assemble extends) and ::element (an iterate
+  whose input is the element and not the collection)."
+  [index op]
+  (let [ctx (assoc index :log (volatile! []) :constants (volatile! {}) :stack #{} :env {})]
+    (when-let [{:keys [form file] :as target} (unique-target ctx op)]
+      (let [ctx (assoc ctx :file file :op op :at form)
+            limited? (try
+                       (doseq [[params] (signatures form true)]
+                         (let [args (mapv (fn [i p] (assoc (step! ctx p :input (if (symbol? p) p (str "arg" i)) [])
+                                                          :alias true)) (range) params)]
+                           (invoke ctx form target args)))
+                       false
+                       (catch clojure.lang.ExceptionInfo e (if (::limit (ex-data e)) true (throw e))))]
+        {:steps @(:log ctx) :truncated limited?}))))
 
 (defn analyze [dir files operation & [lang]]
   (let [op (symbol operation)
-        ctx (assoc (source-index dir files op lang) :log (volatile! []) :stack #{} :env {})
-        {:keys [form file] :as target} (unique-target ctx op)]
-    (when-not target (throw (ex-info (str "No unique top-level " (name (:lang ctx)) " defn for " operation ".")
-                                     {:code :flow-operation :extra {:language (:lang ctx) :unparsed (:unparsed ctx)}})))
-    (let [ctx (assoc ctx :file file :op op :at form)
-          limited? (try
-                     (doseq [[params] (signatures form true)]
-                       (let [args (mapv (fn [i p] (assoc (step! ctx p :input (if (symbol? p) p (str "arg" i)) [])
-                                                        :alias true)) (range) params)]
-                         (invoke ctx form target args)))
-                     false
-                     (catch clojure.lang.ExceptionInfo e (if (::limit (ex-data e)) true (throw e))))]
-      (report ctx dir op limited?))))
+        index (source-index dir files op lang)
+        {:keys [steps truncated]} (trace index op)]
+    (when-not steps (throw (ex-info (str "No unique top-level " (name (:lang index)) " defn for " operation ".")
+                                    {:code :flow-operation :extra {:language (:lang index) :unparsed (:unparsed index)}})))
+    (report index dir op steps truncated)))
