@@ -23,6 +23,7 @@ move a pattern), and a move is kept only when a measurement says so.
 cd layout-descent
 clojure -M:cli help
 clojure -M:cli facts ../some-project/src       # what the code does to nested maps
+clojure -M:cli flow ../some-project/src --operation app.core/handle   # what one operation reads
 cp examples/risk/plan.edn /tmp/plan.edn
 clojure -M:cli verify /tmp/plan.edn            # gate: compile and compare with the model
 clojure -M:cli descend /tmp/plan.edn           # greedy search, writes a candidate
@@ -234,10 +235,17 @@ clojure -M:cli flow src --operation layout-descent.bench/center --save /tmp/cent
   `:price` is carried into `:sale-price`, then into `:receipt-price`. Multiplication **consumes** the
   sale price; `:amount` is a new fact whose input is the multiplication, not another name for price.
   A `write` means the value crossed a boundary and its origin is not known.
+- **Ground a plan:** run `flow` on each operation that reads a shape of the plan; `in` of a `facts`
+  site names it. The `path` of its reads gives the patterns that one operation reads together,
+  `fields` the part of the leaf that the code uses, and a step with `access` `write` a path that the
+  operation also changes. In the fixture, `board.game/act` reads `:tile/kind` and `:tile/ids` at
+  `[":world" "[? ?]"]` and writes the same shape. When the reads pass through a boundary, such as a
+  query of a database, no step has their path: take the pattern from the source and say so in `:notes`.
 - **Ask a layout question:** `iterate`, `collect`, `inspect`, `pass` and `return` show how values move
   apart from their use in a calculation. For example, in `bench/center` the samples go to `median`
-  one generation at a time, and all together to the `median` of their distances. Before changing that, measure the frequency,
-  time and allocation of the whole operation and check that both its center and spread are unchanged.
+  one generation at a time, and all together to the `median` of their distances. Before changing
+  that, measure the frequency, time and allocation of the whole operation and check that both its
+  center and spread are unchanged.
 
 The trace uses one language (`language`): `.clj` or `.cljs` plus that side of `.cljc`. There is no need
 to rename source files. An entry defined on only one platform selects it; if shared, the default is

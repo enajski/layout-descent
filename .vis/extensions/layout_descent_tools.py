@@ -21,23 +21,30 @@ layout-descent ({ROOT}) searches for the data layout that serves the access patt
 map fastest. A plan file (EDN) states the task (:levels, :leaf, :patterns, :workload) and the
 layout decisions (:orders, :serve). The tools are in the `descent` namespace.
 
-To trace information rather than choose a layout, use `descent.flow(src_dir, operation)`. Its steps
-link origins, carriers and uses at source sites. Use the original .cljs sources; `lang="cljs"` selects
-that side of shared .cljc files. Boundaries are unknown, and static counts are not heat.
+`descent.flow(src_dir, operation)` traces information through one operation. Its steps link origins,
+carriers and uses at source sites. It is step 2 of the loop, and it also answers a question about
+the code when there is no plan. Use the original .cljs sources; `lang="cljs"` selects that side of
+shared .cljc files. Boundaries are unknown, and static counts are not heat.
 
 The loop:
 1. `descent.facts([src_dir])`: the path shapes of the code. `?` is a :key level, `*` a :scan level.
    `[? ?]` is one key that is a vector of computed parts: model each part as a level.
    `hidden` counts the shallow shapes and the write sites that the answer leaves out; follow `hint`.
-2. Write a plan with one order. `{ROOT}/examples/risk/plan.edn` is a model; `{ROOT}/README.md` has the keys.
+2. `descent.flow(src_dir, operation)` for each operation that reads a shape of the plan: `in` of a
+   `facts` site names it. The answer has the reads and writes of that operation with their `path`,
+   and `fields` gives the uses of each value that it reads. Take from it the reads that one
+   operation does together, the part of the leaf that the code uses, and the paths that the
+   operation writes. A `boundary` step ends a trace. When the reads pass through one, such as a
+   query engine, say so in :notes and take the pattern from the source.
+3. Write a plan with one order. `{ROOT}/examples/risk/plan.edn` is a model; `{ROOT}/README.md` has the keys.
    Put the grounding of the plan in :notes: `accept` keeps :notes and drops comments.
-3. `descent.check(plan)`, then `descent.verify(plan)`.
-4. `descent.descend(plan)` walks the neighbors, and the splits that their numbers suggest. Its
+4. `descent.check(plan)`, then `descent.verify(plan)`.
+5. `descent.descend(plan)` walks the neighbors, and the splits that their numbers suggest. Its
    `reach` says how many candidates it timed and what it does not try. For other candidates use
    `descent.neighbors(plan, out_dir)`, or write one. A candidate keeps the task and changes only
    :orders and :serve.
-5. `descent.evaluate(candidate, against=plan)`. The verdict is `better`, `worse` or `no-change`.
-6. `descent.accept(candidate, into=plan)` only after a `better` verdict.
+6. `descent.evaluate(candidate, against=plan)`. The verdict is `better`, `worse` or `no-change`.
+7. `descent.accept(candidate, into=plan)` only after a `better` verdict.
 
 For a report: `descent.descend` gives the cost, the bytes and the ns of each pattern for every step
 and writes each chosen plan; `save=file` keeps the whole answer as JSON. `descent.measure([plan, ...])`
