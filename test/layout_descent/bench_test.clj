@@ -28,6 +28,20 @@
     (testing "generations that disagree raise the spread"
       (is (= {:ns 10.0 :spread 2.0} (center [[10.0 10.0 10.0] [12.0 12.0 12.0] [15.0 15.0 15.0]]))))))
 
+(deftest reps-come-from-a-batch-that-the-timer-can-read
+  (let [reps-for @(ns-resolve 'layout-descent.bench 'reps-for)
+        ;; a timer with steps of 42 ns, as System/nanoTime has on macOS
+        coarse (fn [call-ns] (fn [reps] (* 42.0 (quot (long (* (double call-ns) (long reps))) 42))))
+        calls (atom [])]
+    (testing "a call shorter than a step of the timer"
+      (is (< 300000 (long (reps-for (coarse 13.0) 4e6)) 315000) "4 ms of 13 ns calls")
+      (is (< 210000 (long (reps-for (coarse 18.5) 4e6)) 222000) "4 ms of 18.5 ns calls"))
+    (testing "a batch that is long enough is timed once"
+      (is (= 5 (reps-for (fn [reps] (swap! calls conj reps) 800000.0) 4e6)))
+      (is (= [1] @calls)))
+    (testing "a batch longer than the target runs once"
+      (is (= 1 (reps-for (constantly 9e6) 4e6))))))
+
 (deftest every-generation-compiles-again-and-warms-another-plan-first
   (let [base (fx/normal fx/small-risk)
         indexed (fx/with-order fx/small-risk [2 0 1] :csf [:feature-total])

@@ -71,6 +71,22 @@
       (when (or (< runs 2) (< (System/nanoTime) deadline))
         (recur (inc runs))))))
 
+(def ^:private timed-ns
+  "The shortest batch that sets reps: about 2,400 steps of System/nanoTime on macOS."
+  100000.0)
+
+(defn- reps-for
+  "Repetitions that make one batch last target-ns. batch-ns gives the time of a batch of reps.
+  Reps grow tenfold until a batch lasts timed-ns. A scan with no key has one argument vector, so
+  its batch of one call is shorter than a step of the timer: it read 0 or 42 ns, and reps came out
+  at 4,000,000 or 95,238 where 216,000 fill the target."
+  ^long [batch-ns ^double target-ns]
+  (loop [reps 1]
+    (let [ns (double (batch-ns reps))]
+      (if (< ns (double timed-ns))
+        (recur (* 10 reps))
+        (max 1 (long (/ (* target-ns reps) ns)))))))
+
 (defn- warm
   "Warm a case for warm-ms, then set reps so one sample lasts target-ms. The first third runs in a
   loop that is thrown away, so the JIT compiles the function by itself before it compiles the loop
@@ -81,8 +97,10 @@
         _ (spin (assoc case :run ((:loop case)) :reps 1) first-ms)
         one (assoc case :run ((:loop case)) :reps 1)
         _ (spin one (- (long warm-ms) first-ms))
-        batch-ns (* (double (apply min (repeatedly 3 #(sample one)))) (alength ^objects (:args case)))]
-    (assoc one :reps (max 1 (long (/ (* 1000000.0 (long target-ms)) (max 1.0 batch-ns)))))))
+        n (alength ^objects (:args case))
+        batch-ns (fn [reps]
+                   (* (double (apply min (repeatedly 3 #(sample (assoc one :reps reps))))) (long reps) n))]
+    (assoc one :reps (reps-for batch-ns (* 1000000.0 (long target-ms))))))
 
 (defn- median [xs]
   (let [v (vec (sort xs))
