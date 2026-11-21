@@ -31,13 +31,15 @@ clojure -M:cli accept /tmp/candidates/<task-hash>/<layout-hash>.edn --into /tmp/
 clojure -M:cli status /tmp/plan.edn
 ```
 
-One run of the example on the development machine, weighted mean ns for each call:
+One run of the example on the development machine, weighted mean ns for each call. The cost of a
+plan is the one that the next step measured for it. The gain is that of the step, measured again
+on its own:
 
 | Plan | Orders | Cost | Bytes | Step |
 | --- | --- | --- | --- | --- |
-| `e471a80f71f4` | `[0 1 2] :hash` | 6618 | 2,174,944 | start |
-| `85b647ff5a1b` | `[0 1 2] :hash`, `[2 0 1] :csf` | 219 | 2,616,144 | `descend`, -96.8 % |
-| `ed154bfaea1c` | `[0 1 2] :hash`, `[2 0 1] :csf`, `[0 1 2] :csf` | 173 | 3,078,624 | `descend`, split, -18.7 % |
+| `e471a80f71f4` | `[0 1 2] :hash` | 6902 | 2,174,944 | start |
+| `2de6f2cb6d30` | `[0 1 2] :hash`, `[2 1 0] :csf` | 210 | 2,690,688 | `descend`, -96.9 % |
+| `34b4572423c3` | `[0 1 2] :hash`, `[2 1 0] :csf`, `[0 1 2] :csf` | 168 | 3,153,168 | `descend`, split, -19.4 % |
 
 A candidate may be any valid plan of the task; `neighbors` and `descend` are only the mechanical
 baseline. `neighbors` changes one decision at a time. `descend` adds one kind of candidate that
@@ -49,9 +51,22 @@ A step is kept only when it is better alone.
 A split adds an order, so it adds bytes. With `:ns-per-byte 0.0` those bytes are free and
 `descend` takes a split for a small gain in time; its answer then carries the warning
 `memory-not-priced` of the final plan. Set a price when memory counts. In the run above, the
-neighbor `4bd9518c54ef` (`[0 1 2] :csf`, `[2 0 1] :csf`) was also better in the last step, with
-903,680 bytes and a gain of 14.5 % against 19.3 % for the split. A step takes the better candidate
+neighbor `de8f7733f6b2` (`[0 1 2] :csf`, `[2 1 0] :csf`) was also better in the last step, with
+978,224 bytes and a gain of 17.2 % against 20.8 % for the split. A step takes the better candidate
 with the largest gain against the plan of its own batch.
+
+Only the first step is the same in every run. Four runs of this example ended in four plans, each
+97.4 % to 97.7 % below the start, because the candidates after the first step are close:
+
+- **The second order.** `[2 0 1] :csf` and `[2 1 0] :csf` tie at -96.9 % to -97.0 %. Two runs took
+  each.
+- **The format of `[0 1 2]`.** The change to `:csf` gained 16.6 % to 17.9 % in every run. Three
+  runs took it, and one took the split, as above.
+- **`[0 1 2] :hash` as a third order** beside two `:csf` orders is worth 5 % to 7 %, with
+  `:min-gain` at 5 %, for 3.2 to 3.4 times the memory. Two runs ended with it and two without.
+
+A greedy search takes one of such candidates and does not say that the others are worse. Time them
+together with `measure` before you choose between them.
 
 `reach` in the answer of `descend` counts the candidates that were timed and lists what the search
 does not try:
@@ -62,9 +77,7 @@ does not try:
   prefix but stores the scanned levels in another order.
 - **The plans behind a better candidate** that did not have the largest gain of its step.
 
-Write such a plan by hand and give it to `evaluate`. Expect `no-change` often: on this example a
-third order `[0 1 2] :hash` measured -6.1 % at 3.4 times the memory, and on another task the same
-move was inside the noise.
+Write such a plan by hand and give it to `evaluate`. Expect `no-change` often.
 
 ## The plan file
 
