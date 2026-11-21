@@ -8,6 +8,7 @@ import importlib.util
 import json
 import shutil
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -38,6 +39,8 @@ def stub_sdk():
 
         return mark
 
+    sdk.attach = mock.Mock()
+    sdk.ui = types.SimpleNamespace(app=record("app"), diff=record("diff"))
     sdk.method = method
     sdk.register_extension = sdk.registered.append
     return sdk
@@ -84,11 +87,32 @@ class ExtensionTest(unittest.TestCase):
                      "avoid single-letter names", "invariants and compatibility choices"):
             self.assertIn(rule, prompt)
 
+    def test_review_patch_opens_native_diff_without_changing_patch(self):
+        diff = "--- a/src.clj\n+++ b/src.clj\n@@ -1 +1 @@\n-old\n+new\n"
+        with tempfile.TemporaryDirectory() as directory:
+            patch = Path(directory) / "proposal.patch"
+            patch.write_text(diff, encoding="utf-8")
+            with mock.patch.object(self.sdk, "attach") as attach:
+                answer = self.descent.review_patch(str(patch), old_revision="base")
+                attach.assert_called_once()
+                app = attach.call_args.args[0]
+                node = app.args[1]
+                self.assertEqual(("app", "diff"), (app.kind, node.kind))
+                self.assertEqual(("proposed-source", diff), node.args)
+                self.assertEqual("base", node.old_revision)
+            self.assertEqual(str(patch), answer["patch"])
+            self.assertEqual(diff, patch.read_text(encoding="utf-8"))
+            patch.write_text("<html>not a patch</html>", encoding="utf-8")
+            with mock.patch.object(self.sdk, "attach") as attach:
+                with self.assertRaises(self.module.DescentError):
+                    self.descent.review_patch(str(patch))
+                attach.assert_not_called()
+
     def test_every_tool_has_a_tag_an_activity_and_a_docstring(self):
         tools = [n for n in dir(self.descent) if not n.startswith("_")]
         self.assertEqual(
             ["accept", "check", "descend", "emit", "evaluate", "facts", "flow", "journal", "measure", "neighbors",
-             "report", "schema", "status", "verify"],
+             "report", "review_patch", "schema", "status", "verify"],
             tools,
         )
         for name in tools:

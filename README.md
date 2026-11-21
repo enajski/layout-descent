@@ -365,6 +365,11 @@ command: `descent.facts`, `flow`, `schema`, `check`, `status`, `report`, `journa
 is a returned answer with `ok` false; only a usage or internal error raises. Vis loads the file
 when this project is in the workspace; reload Vis after a change.
 
+For an application refactor, open the proposed unified Git patch with
+`descent.review_patch(patch, old_revision="<base revision>")`. This Vis-only tool opens a native
+line-by-line review without applying the patch. Include the same patch in the benchmark bundle
+so reviewers can inspect the proposed code alongside the measurements and checks.
+
 ## Use an emitted layout
 
 Add layout-descent to the classpath of the project, because the emitted namespace needs

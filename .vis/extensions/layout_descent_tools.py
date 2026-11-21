@@ -1,7 +1,6 @@
 """Vis tools for layout-descent.
 
-Each tool runs one command of `layout-descent.cli` in a subprocess and returns its JSON answer as
-a dict. The command line is the contract; this file adds no rule of its own.
+Plan and analysis tools wrap `layout-descent.cli`. Patch review is a Vis-only presentation tool.
 """
 
 from __future__ import annotations
@@ -58,6 +57,8 @@ The loop:
 Write proposed source for human review. Use descriptive, domain-specific names for parameters,
 locals and loop indices; avoid single-letter names. Split dense expressions into named steps
 when that makes the data flow clearer. Comment on invariants and compatibility choices, not syntax.
+Show proposed source changes with `descent.review_patch(path)`: use the native diff, not HTML,
+and include the same unapplied unified patch in the benchmark artifact.
 
 For an application refactor, compare the lifecycle, not just prebuilt reads:
 - Trace the producer as well as the readers. Name the earliest shared input, build and rebuild
@@ -268,6 +269,8 @@ def _summaries(command: str, result: dict[str, Any]) -> tuple[str, str, tuple[An
     if command == "emit":
         where = result.get("path", "returned inline")
         return ("Layout emitted", f"{len(result['functions'])} functions of plan {result['hash']}: {where}", ())
+    if command == "review_patch":
+        return (result["title"], f"Native diff: {result['patch']}", ())
     return (command, "", ())
 
 
@@ -537,6 +540,27 @@ class Descent:
         With no `out`, the source is returned as `source`. Only `accept` writes the configured path.
         """
         return run_cli("emit", _path(plan), *_flags(out=_path(out) if out else None))
+
+
+    @vis.method(tag="observation", activity=_activity("review_patch", "Review proposed patch"))
+    def review_patch(
+        self,
+        patch: Annotated[str, "Path to a UTF-8 unified diff of proposed source changes"],
+        title: Annotated[str, "Title of the native diff review"] = "Proposed source changes",
+        old_revision: Annotated[str | None, "Label for the original source"] = None,
+        new_revision: Annotated[str, "Label for the proposed source"] = "Proposed (not applied)",
+    ) -> dict[str, Any]:
+        """Open a native Vis diff review. Reads the patch without applying it or running Git."""
+        path = Path(_path(patch))
+        diff = path.read_text(encoding="utf-8")
+        lines = diff.splitlines()
+        if not any(before.startswith("--- ") and after.startswith("+++ ") and hunk.startswith("@@ ")
+                   for before, after, hunk in zip(lines, lines[1:], lines[2:])):
+            raise DescentError("Expected a unified text diff with at least one changed hunk.")
+        vis.attach(vis.ui.app(title, vis.ui.diff(
+            "proposed-source", diff, old_revision=old_revision, new_revision=new_revision,
+        )))
+        return {"ok": True, "patch": str(path), "title": title}
 
 
 vis.register_extension(
