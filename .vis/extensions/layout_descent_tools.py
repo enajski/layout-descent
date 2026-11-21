@@ -31,7 +31,9 @@ groups the values by their keys into entities, with the fields that one entity c
 Use it first on code you do not know, and to choose the operations for `descent.flow`.
 `entity="e3"` adds the records of one entity with their paths and sites; `diagram=file.md` writes a
 Mermaid flowchart. An entity is a group of records that share keys, not a declared type: say so,
-and name `truncated`, `untraced` and `hidden` when they are not empty.
+and name `truncated`, `untraced` and `hidden` when they are not empty. `shapes` are source evidence,
+not declared types; `shape_contrasts` compares the same key across groups with one source example per
+shape. `name_source` explains labels.
 
 The loop:
 1. `descent.facts([src_dir])`: the path shapes of the code. `?` is a :key level, `*` a :scan level.
@@ -52,6 +54,26 @@ The loop:
    :orders and :serve.
 6. `descent.evaluate(candidate, against=plan)`. The verdict is `better`, `worse` or `no-change`.
 7. `descent.accept(candidate, into=plan)` only after a `better` verdict.
+
+Write proposed source for human review. Use descriptive, domain-specific names for parameters,
+locals and loop indices; avoid single-letter names. Split dense expressions into named steps
+when that makes the data flow clearer. Comment on invariants and compatibility choices, not syntax.
+
+For an application refactor, compare the lifecycle, not just prebuilt reads:
+- Trace the producer as well as the readers. Name the earliest shared input, build and rebuild
+  triggers, the owner of the result, and consumers that still need the old shape.
+- Compare complete paths from the same input: the strongest existing path, a direct builder that
+  keeps its representation, and the proposed layout. When a candidate adapts the old layout,
+  charge both creation of the old layout and conversion. Treat shared work the same on both sides.
+- Gate construction and reads together outside the plan gate. Compare observable results, including
+  required ordering, empty and missing inputs, and behavior across rebuilds. Keep the static pass
+  source-only; a plan gate does not verify an application refactor.
+- Report kernel and lifecycle results separately. Report build time, build allocation, retained
+  size, and build plus zero, one, and several reads. Mark unmeasured costs and distinguish observed
+  workload from assumptions. When reads per build are unknown, report a supported crossover or say
+  why it is unknown; do not recommend a switch on that evidence alone.
+- A `better` layout verdict is not a refactor verdict. Say what remains unverified before proposing
+  a switch. The existing commands do not provide an application construction gate.
 
 For a report: `descent.descend` gives the cost, the bytes and the ns of each pattern for every step
 and writes each chosen plan; `save=file` keeps the whole answer as JSON. `descent.measure([plan, ...])`
@@ -337,7 +359,7 @@ class Descent:
     ) -> dict[str, Any]:
         """The data model of a source tree: entities, the links between them and where traces stopped.
 
-        Every function is traced as in `flow`. A record is the origin of a value at one source site
+        Local function templates are reused with the caller's argument origins. A record is the origin of a value at one source site
         (a parameter, a literal, a state, a result); an entity groups the records that share keys.
         `keys` of an entity count the records that have the key and the sites that read, write, scan
         or miss it; `levels` are its paths that end at a scan or at a computed key. A `carries` link

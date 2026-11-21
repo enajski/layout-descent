@@ -36,3 +36,6 @@
 (defn merged [a b] (:x (merge a b)))
 
 (defn looped [xs] (loop [ys xs] (recur (rest ys))))
+
+(defn qualified [{:slot/keys [id] :keys [slot/coord] :as slot}]
+  {:id id :coord coord :kind (:slot/kind slot)})

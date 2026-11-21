@@ -178,3 +178,11 @@
     (is (= [:known-slot] (map :resolution (uses r ":mode" :read))))
     (is (empty? (uses r ":retries" :read))))
   (is (= [:unsupported-macro] (reasons (form "looped")))))
+
+(deftest qualified-map-keys-bind-unqualified-locals
+  (let [r (form "qualified")]
+    (is (empty? (:boundaries r)))
+    (is (= #{[":slot/id"] [":slot/coord"] [":slot/kind"]}
+           (set (map :path (filter #(= :read (:kind %)) (:steps r))))))
+    (is (= [":id"] (map :field (uses r ":slot/id" :carry))))
+    (is (= [":coord"] (map :field (uses r ":slot/coord" :carry))))))

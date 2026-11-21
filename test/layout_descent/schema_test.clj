@@ -45,7 +45,7 @@
 (deftest records-of-one-entity
   (let [m (model "test/fixtures/forms" {:entity "e1"})
         order (first (:entities m))]
-    (is (= ["order" 2 {:param 1 :built 1}] ((juxt :name :records :kinds) order)))
+    (is (= ["order (:id)" 2 {:param 1 :built 1}] ((juxt :name :records :kinds) order)))
     (is (= {":id" [1 1 0 0] ":total" [1 1 0 0]} (counts order)))
     (is (= #{:param :built} (set (map :kind (:records m)))))
     (is (every? #(re-matches #"r\d+" (:id %)) (:records m)))
@@ -61,6 +61,28 @@
   (is (= 5 (count (:records (model "test/fixtures/forms" {:entity "loose"})))))
   (is (= :schema-entity (try (model "test/fixtures/forms" {:entity "e99"})
                              (catch clojure.lang.ExceptionInfo e (:code (ex-data e)))))))
+
+(deftest reusable-local-summaries
+  (let [m (model "test/fixtures/schema-summary" {})
+        ks (fn [e] (into {} (map (juxt :key :shapes) (:keys e))))
+        result (some #(when (contains? (ks %) ":policy-value") (ks %)) (:entities m))
+        payload (entity m "payload")]
+    (is (= 7 (get-in m [:summaries :bodies])))
+    (is (some #(and (= ":secret" (:key %)) (pos? (:misses %))) (mapcat :keys (:entities m))))
+    (is (pos? (get-in m [:summaries :reuses])))
+    (is (empty? (:truncated m)))
+    (is (= [:map] (result ":policy-value")))
+    (is (= [:vector] (result ":obligation-value")))
+    (is (= :holding-field (:name-source payload)))
+    (is (= :vector (first ((ks payload) ":required-evidence"))))
+    (let [contrast (first (:shape-contrasts m))]
+      (is (= #{[:map] [:vector]} (set (map :shapes (:entities contrast)))))
+      (is (= #{[:map "contracts/rule" :write] [:vector "contracts/obligation" :write]}
+             (set (for [e (:entities contrast) s (:examples e)]
+                    ((juxt :shape :in :access) s)))))
+      (is (every? #(and (= "contracts.clj" (:file %)) (= [":required-evidence"] (:path %))
+                        (pos? (:row %)) (pos? (:col %)))
+                  (mapcat :examples (:entities contrast)))))))
 
 (deftest mermaid-chart
   (let [chart (schema/mermaid

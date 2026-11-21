@@ -74,6 +74,16 @@ class ExtensionTest(unittest.TestCase):
                      "range of the\n  estimate", "clojurescript-sources"):
             self.assertIn(rule, extension.prompt)
 
+    def test_prompt_requires_lifecycle_evidence_for_refactors(self):
+        (extension,) = self.sdk.registered
+        prompt = extension.prompt
+        for rule in ("producer as well as the readers", "a direct builder",
+                     "both creation of the old layout and conversion", "across rebuilds",
+                     "build plus zero, one, and several reads", "reads per build are unknown",
+                     "A `better` layout verdict is not a refactor verdict",
+                     "avoid single-letter names", "invariants and compatibility choices"):
+            self.assertIn(rule, prompt)
+
     def test_every_tool_has_a_tag_an_activity_and_a_docstring(self):
         tools = [n for n in dir(self.descent) if not n.startswith("_")]
         self.assertEqual(
@@ -189,10 +199,10 @@ class ExtensionTest(unittest.TestCase):
         self.assertEqual("Plan risk e471a80f71f4",
                          render(phase="success", args=(), kwargs={}, result=status, error=None).args[0])
         model = self.descent.schema("test/fixtures/forms")
-        self.assertEqual(["order", "ticket"], [e["name"] for e in model["entities"][:2]])
+        self.assertEqual(["order (:id)", "ticket"], [e["name"] for e in model["entities"][:2]])
         shown = self.descent.schema.vis_meta["activity"].render(
             phase="success", args=(), kwargs={}, result=model, error=None)
-        self.assertEqual("8 entities shown, 0 hidden, 0 links, 12 functions in 1 files", shown.args[1])
+        self.assertEqual("10 entities shown, 0 hidden, 1 links, 13 functions in 1 files", shown.args[1])
 
 
 if __name__ == "__main__":

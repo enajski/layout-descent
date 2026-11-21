@@ -9,44 +9,6 @@
 
 (def ^:private field-kinds #{:produce :carry :write})
 
-(defn- extend-all [origins element]
-  (into #{} (map (fn [[root path]] [root (conj path element)])) origins))
-
-(defn- origins
-  "For each step of one trace, in order: where its value comes from, as a set of [root-step-id
-  path]. A read of a field is that field of its container; a field that a known map holds is the
-  value that was stored; a call passes its origin on; a branch has the origins of all its sides;
-  a map that extends a value is that value. Any other step is a root of its own."
-  [steps]
-  (reduce
-   (fn [org {:keys [id kind inputs container field path access control resolution] :as step}]
-     (let [of #(get org % #{})
-           input (of (first inputs))
-           own #{[id []]}]
-       (conj org
-             (case kind
-               :read (case resolution
-                       :known-slot input
-                       :known-miss #{}
-                       (extend-all (of container) field))
-               :boundary (cond (and (= :read access) container) (extend-all (of container) (peek path))
-                               access #{}
-                               :else own)
-               (:pass :return :produce :carry :write) input
-               :state-write (of (last inputs))
-               :choice (into #{} (mapcat of) (remove #{control} inputs))
-               :iterate (if (::flow/element step) input (extend-all input "*"))
-               :collect (if (::flow/same step) input own)
-               :project (case resolution
-                          :known-slot input
-                          :known-miss #{}
-                          (extend-all (of container) "*"))
-               :assemble (let [onto (of (::flow/onto step))] (if (seq onto) onto own))
-               ;; A computed value, such as a sum or a test, holds no fields.
-               (:consume :inspect) #{}
-               own))))
-   [] steps))
-
 (defn- root
   "What a root step is: {:kind :name}, and :file :row :col :in for a root at one source site.
   A reference and a var are one record wherever the code reads them."
@@ -64,87 +26,116 @@
                   (assoc at :kind :result :name (str "result of " via)))
       (assoc at :kind :value :name (str (name kind) " " via)))))
 
-(defn- trace-facts
-  "The accesses and the links of one trace. An access is [root path kind site], with kind :read,
-  :miss (a read of a field that the known map does not have), :write or :scan. A link is
-  [kind from-root from-path to-root to-path]: :carries moves a field of one record into a field
-  of another, :holds stores a whole record in a field."
-  [steps]
-  (let [org (origins steps)
-        root-of (memoize #(root steps (nth steps %)))
-        site (juxt :file :row :col :in)
-        ;; A field belongs to the first assemble that takes it.
-        owner (reduce (fn [m {:keys [id kind inputs]}]
-                        (if (= :assemble kind)
-                          (reduce #(if (and (field-kinds (:kind (nth steps %2))) (not (contains? %1 %2)))
-                                     (assoc %1 %2 id)
-                                     %1)
-                                  m inputs)
-                          m))
-                      {} steps)
-        accesses (fn [origins element kind step]
-                   (for [[r path] origins] [(root-of r) (conj path element) kind (site step)]))]
-    (reduce
-     (fn [out {:keys [id kind inputs container field path access resolution] :as step}]
-       (cond
-         (= :read kind)
-         (update out :accesses into
-                 (accesses (get org container #{}) field (if (= :known-miss resolution) :miss :read) step))
+(defn- below [v k]
+  (into #{} (map (fn [[r path]] [r (conj path k)])) (:org v)))
 
-         (and (= :boundary kind) access container)
-         (let [to (get org container #{})
-               ;; The inputs of a write under a computed key are the map, the key and the value.
-               from (if (and (= :write access) (= 3 (count inputs))) (get org (peek inputs) #{}) #{})]
-           (-> out
-               (update :accesses into (accesses to (peek path) access step))
-               (update :links into (for [[r1 p1] from
-                                         [r2 p2] to]
-                                     [(if (empty? p1) :holds :carries) (root-of r1) p1 (root-of r2) (conj p2 (peek path))]))))
+(defn- merge-values [vs]
+  {:org (into #{} (mapcat :org) vs) :shapes (into #{} (mapcat :shapes) vs)})
 
-         (and (= :iterate kind) (not (::flow/element step)))
-         (update out :accesses into (accesses (get org (first inputs) #{}) "*" :scan step))
+(defn- prefer-site [a b]
+  (if (or (nil? a) (neg? (compare b a))) b a))
 
-         (and (field-kinds kind) (owner id))
-         (let [to (get org (owner id))
-               from (get org (first inputs) #{})]
-           (-> out
-               (update :accesses into (accesses to field :write step))
-               (update :links into (for [[r1 p1] from
-                                         [r2 p2] to
-                                         :let [target (conj p2 field)]
-                                         :when (not= [r1 p1] [r2 target])]
-                                     [(if (empty? p1) :holds :carries) (root-of r1) p1 (root-of r2) target]))))
+(defn- record! [state v k kind site shapes]
+  (doseq [[r path] (below v k)]
+    (vswap! state update-in [:records r path kind] (fnil conj #{}) site)
+    (doseq [shape shapes]
+      (vswap! state update-in [:shapes r path shape] prefer-site [(if (= kind :write) 0 1) site kind]))))
 
-         :else out))
-     {:accesses [] :links []} steps)))
+(defn- store! [state dst k src site]
+  (record! state dst k :write site (:shapes src))
+  (doseq [[a p] (:org src) [b q] (below dst k) :when (not= [a p] [b q])]
+    (vswap! state update :links conj [(if (seq p) :carries :holds) a p b q])))
 
-(defn- collect
-  "Trace every function that no other function reaches: first those that the tree never names,
-  then each one that no earlier trace entered."
-  [index]
+(defn- boundary! [state s reason]
+  (vswap! state update :boundaries conj [reason (:via s) (:file s) (:row s) (:col s)]))
+
+(defn- instantiate
+  "Interpret one cached local body against actual argument origins. No nested step log is built."
+  [state steps args call]
+  (let [site-of (juxt :file :row :col :in)
+        owners (reduce (fn [m s] (if (= :assemble (:kind s))
+                                   (reduce #(if (contains? %1 %2) %1 (assoc %1 %2 (:id s))) m (:inputs s)) m)) {} steps)]
+    (peek
+     (reduce
+      (fn [vs {:keys [id kind field via inputs container path access reason resolution] :as s}]
+        (let [src (get vs (first inputs)) m (get vs container) site (site-of s)
+              own (fn [] {:org #{[(root steps s) []]}})
+              value (case kind
+                      :input (if args (get args id) (own))
+                      :call (call s (mapv (fn [{:keys [id shape]}]
+                                            (if id (vs id) (when shape {:shapes #{shape}})))
+                                          (::flow/args s)))
+                      (:pass :return) (cond-> src
+                                        (::flow/shape s) (assoc :shapes #{(::flow/shape s)})
+                                        (::flow/removed s) (update :slots #(apply dissoc % (::flow/removed s)))
+                                        (and (contains? s ::flow/removed) (nil? (::flow/removed s)))
+                                        (dissoc :closed :slots))
+                      :state-write (get vs (last inputs))
+                      (:produce :carry :write) (cond-> src (::flow/shape s) (assoc :shapes #{(::flow/shape s)}))
+                      :read (let [known (get (:slots m) field)
+                                  miss (or (= :known-miss resolution) (and (:closed m) (not known)))
+                                  v (cond miss {} known known (= :known-slot resolution) src :else {:org (below m field)})]
+                              (record! state m field (if miss :miss :read) site (:shapes v)) v)
+                      :assemble
+                      (if (#{"vector" "set"} via)
+                        (assoc (own) :shapes #{(keyword via)})
+                        (let [onto (get vs (::flow/onto s))
+                              dst (assoc (if (seq (:org onto)) onto (own)) :shapes #{:map})
+                              slots (into {} (for [i inputs :let [t (steps i)] :when (field-kinds (:kind t))]
+                                               [(:field t) (or (vs i) {})]))]
+                          (doseq [i inputs :let [t (steps i)] :when (and (field-kinds (:kind t)) (= id (owners i)))]
+                            (store! state dst (:field t) (vs i) (site-of t)))
+                          (assoc dst :closed (or (:closed onto) (nil? (::flow/onto s))) :slots (merge (:slots onto) slots))))
+                      :boundary (do (boundary! state s reason)
+                                    (cond (and container (= :read access))
+                                          (do (record! state m (peek path) :read site nil) {:org (below m (peek path))})
+                                          (and container (= :write access))
+                                          (do (store! state m (peek path) (get vs (last inputs)) site) {})
+                                          :else (own)))
+                      :iterate (if (::flow/element s) src
+                                 (do (record! state src "*" :scan site nil)
+                                     (or (:element src) {:org (below src "*")})))
+                      :project (case resolution :known-slot src :known-miss {}
+                                     (or (:element m) {:org (below m "*")}))
+                      :collect (let [v (if (::flow/same s) src (assoc (own) :element src))]
+                                 (assoc v :shapes #{(case via ("clojure.core/mapv" "cljs.core/mapv" "clojure.core/vec" "cljs.core/vec"
+                                                                "clojure.core/filterv" "cljs.core/filterv") :vector
+                                                          ("clojure.core/set" "cljs.core/set") :set :collection)}))
+                      :choice (merge-values (map vs inputs))
+                      (:consume :inspect) {}
+                      (own))]
+          (conj vs value))) [] steps))))
+
+(defn- collect [index]
   (let [ops (sort-by str (keys (:defs index)))
+        templates (into {} (map (fn [op] [(str op) (flow/templates index op)])) ops)
+        state (volatile! {:entries [] :visited #{} :truncated #{} :records {} :links #{} :shapes {} :boundaries #{}})
         used (into #{} (map first) (vals (:calls index)))
-        run (fn [state op]
-              (if (contains? (:visited state) (str op))
-                state
-                (if-let [{:keys [steps truncated]} (flow/trace index op)]
-                  (let [{:keys [accesses links]} (trace-facts steps)]
-                    (-> state
-                        (update :entries conj (str op))
-                        ;; A trace that hit the step limit did not finish the functions it entered.
-                        (update :visited into (if truncated [(str op)] (map :in steps)))
-                        (update :truncated into (when truncated [(str op)]))
-                        (update :records (fn [records]
-                                           (reduce (fn [m [r path kind site]]
-                                                     (update-in m [r path kind] (fnil conj #{}) site))
-                                                   records accesses)))
-                        (update :links into links)
-                        (update :boundaries into
-                                (for [s steps :when (= :boundary (:kind s))]
-                                  [(:reason s) (:via s) (:file s) (:row s) (:col s)]))))
-                  (update state :untraced conj (str op)))))
-        start {:entries [] :visited #{} :truncated [] :untraced [] :records {} :links #{} :boundaries #{}}]
-    (reduce run (reduce run start (remove used ops)) ops)))
+        cache (volatile! {}) hits (volatile! 0) cuts (volatile! 0)]
+    (letfn [(run [op arity args stack site fuel]
+              (let [key [op arity args] body (get-in templates [op arity])]
+                (cond
+                  (or (stack op) (>= (count stack) 32))
+                  (do (vswap! cuts inc) (boundary! state site (if (stack op) :recursive-call :call-depth)) {})
+                  (contains? @cache key) (do (vswap! hits inc) (get @cache key))
+                  (not body) (do (boundary! state site :unsupported-arity) {})
+                  (neg? (vswap! fuel - (count (:steps body)))) (throw (ex-info "Schema expansion limit" {::limit true}))
+                  :else (let [before @cuts
+                              result (instantiate state (:steps body) args
+                                                  (fn [s argv] (run (:via s) (count argv) argv (conj stack op) s fuel)))]
+                          (vswap! state update :visited conj [op arity])
+                          (if (:truncated body)
+                            (do (vswap! state update :truncated conj op) {})
+                            (do (when (and (= before @cuts) (< (count @cache) 4096)) (vswap! cache assoc key result)) result))))))]
+      (doseq [sym (concat (remove used ops) ops) :let [op (str sym)]
+              [arity _] (sort-by key (templates op)) :when (not ((:visited @state) [op arity]))]
+        (vswap! state update :entries conj op)
+        (try (run op arity nil #{} nil (volatile! 100000))
+             (catch clojure.lang.ExceptionInfo e
+               (if (::limit (ex-data e)) (vswap! state update :truncated conj op) (throw e)))))
+      (assoc @state :truncated (vec (sort (:truncated @state)))
+             :untraced (vec (sort (for [[op arities] templates :when (empty? arities)] op)))
+             :summaries {:bodies (reduce + (map count (vals templates))) :reuses @hits}))))
 
 (def ^:private kind-rank {:state 0 :var 1 :param 2 :result 3 :built 4 :value 5})
 
@@ -206,31 +197,75 @@
        (sort-by (juxt (comp - :sites) (comp str :reason)))
        vec))
 
-(defn- entity-name
-  "The name that the code gives the entity: the most frequent parameter name of its records, or
-  the function of its first record."
-  [members]
-  (let [labels (remove #(re-matches #"arg\d+" %) (keep :label members))
-        {:keys [in name]} (first members)]
-    (or (ffirst (sort-by (juxt (comp - val) key) (frequencies labels))) in name)))
+(defn- common [xs]
+  (ffirst (sort-by (juxt (comp - val) key) (frequencies xs))))
 
-(defn- entity-row [fields-of members]
+(defn- entity-name [members held]
+  (let [labels (remove #(re-matches #"arg\d+" %) (keep :label members))
+        label (common labels)
+        field (common (mapcat held members))
+        {:keys [in name]} (first members)]
+    (cond (and label (not (#{"m" "x" "v" "result" "opts"} label))) [label :parameter]
+          field [(str/replace-first field #"^:" "") :holding-field]
+          label [label :parameter]
+          :else [(or in name) :source])))
+
+(defn- distinguish [groups]
+  (let [by-name (group-by (comp :name second) groups)]
+    (mapv (fn [[members row :as group]]
+            (let [peers (by-name (:name row))]
+              (if (= 1 (count peers)) group
+                (let [others (into #{} (mapcat #(map :key (:keys (second %)))) (remove #{group} peers))
+                      k (some #(when-not (others (:key %)) (:key %)) (:keys row))]
+                  [members (update row :name str " (" (or k (:name (first members))) ")")])))) groups)))
+
+(defn- entity-row [fields-of shapes held members]
   (let [paths (apply merge-with (partial merge-with into) (map fields-of members))
         sum (fn [rows] (counts (apply merge-with into (map val rows))))
         by-key (group-by (comp named-key key) paths)
-        holders (frequencies (mapcat #(distinct (keep named-key (keys (fields-of %)))) members))]
-    {:name (entity-name members)
+        observed (reduce (fn [m [p forms]]
+                           (let [[k & nested] (drop-while structural? p)]
+                             (if (and k (empty? nested)) (update m k (fnil into #{}) (keys forms)) m)))
+                         {} (mapcat shapes members))
+        holders (frequencies (mapcat #(distinct (keep named-key (keys (fields-of %)))) members))
+        [label source] (entity-name members held)]
+    {:name label :name-source source
      :records (count members)
      :kinds (frequencies (map :kind members))
      :functions (count (distinct (for [[_ by-kind] paths [_ sites] by-kind [_ _ _ in] sites] in)))
      :keys (->> (dissoc by-key nil)
-                (map (fn [[k rows]] (merge {:key k :records (holders k)} (sum rows))))
+                (map (fn [[k rows]] (merge {:key k :records (holders k)
+                                            :shapes (vec (sort (observed k)))} (sum rows))))
                 (sort-by (juxt (comp - :records) :key))
                 vec)
      :levels (->> (group-by (comp level key) paths)
                   (keep (fn [[path rows]] (when path (merge {:path path} (sum rows)))))
                   (sort-by (comp vec :path))
                   vec)}))
+
+(defn- shape-examples [observed members k shapes]
+  (let [evidence (reduce (fn [m [path forms]]
+                           (if (= [k] (drop-while structural? path))
+                             (reduce-kv (fn [m shape [rank site kind]]
+                                          (update m shape prefer-site [rank site kind path])) m forms)
+                             m)) {} (mapcat observed members))]
+    (mapv (fn [shape]
+            (let [[_ [file row col in] access path] (evidence shape)]
+              {:shape shape :path path :file file :row row :col col :in in :access access})) shapes)))
+
+(defn- contrasts [groups observed]
+  (let [members-of (into {} (map (fn [[id members _]] [id members])) groups)
+        rows (for [[id _ row] groups k (:keys row)
+                   :let [shapes (vec (remove #{:collection :nil} (:shapes k)))] :when (seq shapes)]
+               [(:key k) {:entity id :shapes shapes}])]
+    (->> (group-by first rows)
+         (keep (fn [[k pairs]]
+                 (let [evidence (mapv second pairs)]
+                   (when (< 1 (count (distinct (map :shapes evidence))))
+                     {:key k :entities (mapv (fn [{:keys [entity shapes] :as e}]
+                                              (assoc e :examples (shape-examples observed (members-of entity) k shapes)))
+                                            evidence)}))))
+         (sort-by :key) vec)))
 
 (defn- entity-links
   "The links between two entities: how many fields one carries into the other, with examples."
@@ -255,12 +290,15 @@
   end at a scan or at a computed key. A record is the origin of a value at one source site."
   [dir files lang {:keys [limit entity sites]}]
   (let [index (flow/index dir files nil lang)
-        {:keys [entries truncated untraced records links boundaries]} (collect index)
+        {:keys [entries truncated untraced records links boundaries shapes summaries]} (collect index)
         ordered (vec (sort-by (fn [r] [(kind-rank (:kind r)) (:name r) (str (:file r)) (or (:row r) 0) (or (:col r) 0)])
                               (keys records)))
         record-id (into {} (map-indexed (fn [i r] [r (str "r" (inc (long i)))])) ordered)
+        held (reduce (fn [m [kind from _ _ p]]
+                       (if (and (= :holds kind) (peek p) (not (structural? (peek p)))) (update m from (fnil conj []) (peek p)) m)) {} links)
         grouped (->> (group (for [r ordered] {:id r :keys (into #{} (keep named-key) (keys (records r)))}))
-                     (map (fn [{members :records}] [members (entity-row records members)]))
+                     (map (fn [{members :records}] [members (entity-row records shapes held members)]))
+                     distinguish
                      (sort-by (fn [[_ row]] [(- (long (:records row))) (- (count (:keys row))) (str (:name row))]))
                      (map-indexed (fn [i [members row]] [(str "e" (inc (long i))) members row]))
                      vec)
@@ -278,11 +316,12 @@
       :files (:file-count index)
       :unparsed (:unparsed index)
       :functions (count (:defs index))
-      :entries (count entries)
+      :entries (count (distinct entries)) :summaries summaries
       :truncated truncated
       :untraced untraced
       :note "An entity groups records that share keys; a record is the origin of a value at a source site, not a type. Counts are sites, not executions."
       :entities (vec (for [[id _ row] (take limit grouped)] (into (array-map :id id) row)))
+      :shape-contrasts (contrasts (take limit grouped) shapes)
       :links (filterv #(and (shown (:from %)) (shown (:to %))) (entity-links links entity-of))
       :hidden {:entities (max 0 (- (count grouped) (long limit))) :loose-records (count loose)}
       :boundaries (boundary-rows boundaries)}
@@ -290,7 +329,7 @@
       (assoc :entity entity
              :records (vec (for [r chosen]
                              (assoc r :id (record-id r)
-                                    :fields (mapv #(field-row sites %) (sort-by (comp vec key) (records r))))))
+                                    :fields (mapv #(assoc (field-row sites %) :shapes (vec (sort (keys (get-in shapes [r (key %)]))))) (sort-by (comp vec key) (records r))))))
              :record-links (->> links
                                 (filter (fn [[_ from _ to _]] (or (member? from) (member? to))))
                                 (map (fn [[kind from from-path to to-path]]

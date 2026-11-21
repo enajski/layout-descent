@@ -79,8 +79,14 @@
                              :inputs (mapv :id (filter :id values)) ::tracks (tracks values)} extra))
     {:id id}))
 
+(defn- literal-shape [v]
+  (let [x (:literal v)]
+    (when (contains? v :literal)
+      (cond (nil? x) :nil (string? x) :string (keyword? x) :keyword
+            (number? x) :number (boolean? x) :boolean))))
+
 (defn- pass! [ctx form kind via v]
-  (merge v (step! ctx form kind via [v])))
+  (merge v (step! ctx form kind via [v] {::shape (literal-shape v)})))
 
 (defn- boundary! [ctx form reason via vs & [extra]]
   (assoc (step! ctx form :boundary via vs (assoc extra :reason reason)) :unknown true))
@@ -115,7 +121,8 @@
 
 (defn- put-field [ctx site k v & [path]]
   (let [kind (cond (:alias v) :carry (:unknown v) :write :else :produce)
-        info (step! ctx site kind "field" [v] {:field (pr-str k) :path (or path [(pr-str k)]) ::introduces true})]
+        info (step! ctx site kind "field" [v] {:field (pr-str k) :path (or path [(pr-str k)]) ::introduces true
+                                                             ::shape (literal-shape v)})]
     (assoc (merge v info) :alias true :tracks (conj (set (:tracks v)) (:id info)))))
 
 (defn- assemble [ctx form via m slots]
@@ -170,12 +177,16 @@
       (when (or (empty? tail) (and (= :as (first tail)) (= 2 (count tail)) (symbol? (second tail))))
         (reduce (fn [c [i b]] (when c (bind-value c b (project c b v i))))
                 (if (seq tail) (bind-value ctx (second tail) v) ctx) (map-indexed vector positions))))
-    (and (map? binding) (every? #{:keys :as} (keys binding))
-         (every? symbol? (:keys binding)))
-    (reduce (fn [ctx sym]
-              (assoc-in ctx [:env (symbol (name sym))]
-                        (read-field ctx sym v (keyword sym))))
-            (if-let [sym (:as binding)] (assoc-in ctx [:env sym] v) ctx) (:keys binding))
+    (and (map? binding)
+         (every? (fn [[k xs]]
+                   (or (= :as k) (and (keyword? k) (= "keys" (name k)) (every? symbol? xs)))) binding))
+    (reduce (fn [ctx [directive syms]]
+              (reduce (fn [ctx sym]
+                        (let [local (name sym)
+                              field (keyword (or (namespace directive) (namespace sym)) local)]
+                          (assoc-in ctx [:env (symbol local)] (read-field ctx sym v field))))
+                      ctx syms))
+            (if-let [sym (:as binding)] (assoc-in ctx [:env sym] v) ctx) (dissoc binding :as))
     :else nil))
 
 (defn- let-body [ctx form]
@@ -199,6 +210,8 @@
         sig (some #(when (and (not-any? #{'&} (first %)) (= (count args) (count (first %)))) %)
                   (signatures form (not closure)))]
     (cond
+      (and (:local ctx) (seq (:stack ctx)) (not closure) sig)
+      (assoc (step! ctx site :call op args {::args (mapv #(hash-map :id (:id %) :shape (literal-shape %)) args)}) :unknown true)
       ((:stack ctx) id) (boundary! ctx site :recursive-call op args)
       (>= (count (:stack ctx)) 32) (boundary! ctx site :call-depth op args)
       (nil? sig) (boundary! ctx site :unsupported-arity op args)
@@ -440,7 +453,9 @@
                   (into {} (for [k (second args)] [k (put-field ctx form k (read-field ctx form m k))]))))
       (and (= 'dissoc core) (seq args))
       (let [[m & ks] (vs)]
-        (pass! ctx form :pass via (cond-> m (:slots m) (update :slots #(apply dissoc % (keep :literal ks))))))
+        (merge (cond-> m (:slots m) (update :slots #(apply dissoc % (keep :literal ks))))
+               (step! ctx form :pass via [m] {::removed (when (every? #(contains? % :literal) ks)
+                                                         (mapv (comp pr-str :literal) ks))})))
       (and (= 'contains? core) (= 2 (count args)))
       (let [[m k] (vs)] (step! ctx form :consume via [(read-key ctx form via m k)]))
       (and (picks core) (= 1 (count args)))
@@ -497,7 +512,7 @@
     {:operation (str op) :root (str (.getCanonicalFile (io/file dir))) :scope :static
      :language (:lang ctx) :files (:file-count ctx) :unparsed (:unparsed ctx) :truncated truncated?
      :note "Possible source paths, not execution counts, allocation sizes or proof of safe removal."
-     :fields (vec fields) :steps (mapv #(dissoc % ::introduces ::tracks ::onto ::element ::same) steps)
+     :fields (vec fields) :steps (mapv #(dissoc % ::introduces ::tracks ::onto ::element ::same ::shape ::removed) steps)
      :boundaries (mapv :id (filter #(= :boundary (:kind %)) steps))}))
 
 (defn index
@@ -523,6 +538,21 @@
                        false
                        (catch clojure.lang.ExceptionInfo e (if (::limit (ex-data e)) true (throw e))))]
         {:steps @(:log ctx) :truncated limited?}))))
+
+(defn templates
+  "Build each fixed arity once. Named nested calls are slots in the template, not expanded bodies."
+  [index op]
+  (when-let [{:keys [file form] :as target} (unique-target index op)]
+    (into {} (for [[params] (signatures form true)
+                   :let [ctx (assoc index :log (volatile! []) :constants (volatile! {}) :stack #{} :env {}
+                                    :file file :op op :at form :local true)
+                         limited? (try
+                                    (invoke ctx form target
+                                            (mapv (fn [i p] (assoc (step! ctx p :input (if (symbol? p) p (str "arg" i)) [])
+                                                                    :alias true)) (range) params))
+                                    false
+                                    (catch clojure.lang.ExceptionInfo e (if (::limit (ex-data e)) true (throw e))))]]
+               [(count params) {:steps @(:log ctx) :truncated limited?}]))))
 
 (defn analyze [dir files operation & [lang]]
   (let [op (symbol operation)

@@ -275,8 +275,8 @@ the possible result. This does not link a later `@state` to that write, count re
 
 This bounded **static** slice follows:
 
-- fixed-arity calls, `let`, simple `:keys` and positional vector bindings, and a `def` whose value is
-  a literal map, vector or set;
+- fixed-arity calls, `let`, `:keys` (including qualified directives or symbols), positional vector
+  bindings, and a `def` whose value is a literal map, vector or set;
 - the threads `->`, `->>`, `as->`, `some->`, `some->>`, `cond->` and `cond->>`;
 - every possible path of `if`, `if-not`, `when`, `when-not`, `if-let`, `when-let`, `if-some`, `when-some`,
   `cond`, `case`, `and`, `or` and `try` with its `catch` and `finally`;
@@ -298,8 +298,12 @@ plan, accepted layout, journal or source is changed. `--save` optionally writes 
 
 ## See the data model
 
-`schema` traces every function of a source directory as `flow` does and puts the results together.
-It does not load the application.
+`schema` builds a local trace template for each function arity and follows named calls by binding
+these templates to the argument origins. The result for the same arguments can be reused; `summaries`
+counts bodies and cache hits. The 2,048-step limit applies to each local body rather than its entire
+call tree. Per-entry expansion is also bounded (100,000 interpreted steps). Recursion, depth 32,
+and unresolved calls are boundaries. A callback or computed key known only at a call site may
+remain unresolved in a template; use `flow` for a context-sensitive trace. Neither loads the app.
 
 ```sh
 clojure -M:cli schema test/fixtures/flow
@@ -313,10 +317,17 @@ clojure -M:cli schema src --entity e2 --save /tmp/e2.json      # the records of 
   are its fields.
 - An **entity** is a group of records that share keys. The record with the most keys comes first; a
   record joins the entity with which it shares the most keys, when these are two or more and at least
-  60 % of its own. An entity is named by the most frequent parameter name of its records. Its `keys`
+  60 % of its own. `name_source` explains the label: prefer a descriptive parameter, then the field
+  holding a member, then a generic parameter or source name. Repeated labels get a distinguishing
+  key when available. These labels are hints, not declarations. Its `keys`
   count the records that have the key and the sites that read, write, scan or miss it (a `miss` reads
   a key that the map at that site cannot have). Its `levels` are the paths that end at a scan (`*`)
   or at a computed key (`?`): the candidates for the `:levels` of a plan.
+- `shapes` on keys and record paths lists observed value forms, such as `map`, `vector` or
+  `string`. Empty means unknown, not absent; scanning alone does not prove a vector. `shape_contrasts`
+  compares differing concrete shape evidence for the same key among the entities shown. Each side
+  includes one source example per shape (`file`, `row`, `col`, `in`, `path`, `access`), preferring
+  a write over a read. This is not exhaustive type inference or a claim of incompatible types.
 - A **link** with kind `carries` says that fields of one entity are stored in another, with up to
   three examples: in the fixture, `:price` of `listing` becomes `:sale-price` of the map that
   `shop.catalog/capture` builds. Kind `holds` says that one entity is stored in a field of another.
@@ -382,6 +393,34 @@ Commit the plan and the emitted file together. `status` says `stale` when they d
 | `file-edited` | The emitted file was edited | The same |
 | `emitter-changed` | layout-descent was updated and emits other source | The same |
 | `file-or-emitter-changed` | One of the last two; the journal is from a version that recorded no digest | The same |
+
+## Evaluate an application refactor
+
+Write proposed code for human review: use domain-specific names for parameters, locals and loop
+indices rather than single letters. Give intermediate values names when they explain the data flow.
+Use comments for invariants and compatibility choices, not to restate the code.
+
+A faster query on a prebuilt dataset does not establish a cheaper refactor. Use the layout
+search for the kernel, then compare the application paths separately:
+
+1. Trace the producer and readers. Identify the earliest input both paths can use, when the
+   structure is built or rebuilt, who owns it, and which callers still need the old shape.
+2. Start from the same input and compare the strongest existing path, a direct builder that
+   keeps the existing representation, and the proposed layout. If an adapter starts from the
+   old representation, include both its creation and the conversion. Include shared work on
+   both sides, or exclude it from both and state the boundary.
+3. Check observable equivalence from construction through reads and rebuilds. Test required
+   ordering, empty and missing inputs, and the behavior after a rebuild. The plan gate checks
+   generated layout semantics, not the application's constructor or compatibility adapters.
+4. Report build time, build allocation, retained size, and lifecycle time for zero, one, and
+   several reads per build, separately from prebuilt query timings. Name unmeasured costs.
+   If reads per build are unknown, report a supported crossover or say why it is unknown.
+   Label assumptions and keep the layout verdict separate from any recommendation to switch.
+
+For example, if an index comes from primitive columns, compare direct construction of the
+current map and the proposed index from those columns. Map-to-index conversion is a separate
+candidate, not the required creation path. No new plan keys or construction gate are needed
+for this workflow; keep source analysis separate from any trusted benchmark harness.
 
 ## Report a result
 
