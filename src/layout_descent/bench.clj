@@ -9,9 +9,9 @@
 (set! *warn-on-reflection* true)
 
 (def defaults
-  "Arguments per pattern, timed rounds, warm-up per pattern, target time of one sample, and the
-  share of arguments that miss."
-  {:args 64 :rounds 15 :warm-ms 150 :target-ms 4 :miss 0.1})
+  "Arguments per pattern, timed rounds, compilations that share the rounds, warm-up per pattern
+  and compilation, target time of one sample, and the share of arguments that miss."
+  {:args 64 :rounds 15 :generations 3 :warm-ms 150 :target-ms 4 :miss 0.1})
 
 ;; The reducing function of a timed scan: fixed arities, no allocation.
 (def ^:private keep-leaf
@@ -21,57 +21,68 @@
     ([_ _ _ _ leaf] leaf)
     ([_ _ _ _ _ leaf] leaf)))
 
-(defn- invoker
-  "A function of [ds args] that calls f at its real arity."
-  [f reduce? arity]
-  (if reduce?
-    (case (int arity)
-      0 (fn [ds ^objects a] (f ds keep-leaf nil))
-      1 (fn [ds ^objects a] (f ds keep-leaf nil (aget a 0)))
-      2 (fn [ds ^objects a] (f ds keep-leaf nil (aget a 0) (aget a 1)))
-      3 (fn [ds ^objects a] (f ds keep-leaf nil (aget a 0) (aget a 1) (aget a 2))))
-    (case (int arity)
-      0 (fn [ds ^objects a] (f ds))
-      1 (fn [ds ^objects a] (f ds (aget a 0)))
-      2 (fn [ds ^objects a] (f ds (aget a 0) (aget a 1)))
-      3 (fn [ds ^objects a] (f ds (aget a 0) (aget a 1) (aget a 2)))
-      4 (fn [ds ^objects a] (f ds (aget a 0) (aget a 1) (aget a 2) (aget a 3))))))
+;; The reducing function of a timed scan is passed to the loop, so no call reads a var.
+
+(defn- loop-form
+  "The source of a timing loop for one arity: a function of [f keep sink] that returns a function
+  of [ds args reps]. That one calls f with every argument vector reps times. The results feed the
+  sink, so no call is dead code."
+  [reduce? arity]
+  (let [call (concat '(f ds) (when reduce? '(keep nil)) (map #(list 'aget 'a %) (range arity)))]
+    (list 'fn '[f keep ^longs sink]
+          (list 'fn '[ds ^objects args ^long reps]
+                (list 'let '[n (alength args)]
+                      (list 'loop '[r 0 i 0 acc 0]
+                            (list 'cond
+                                  '(= r reps) '(aset sink 0 (unchecked-add (aget sink 0) acc))
+                                  '(= i n) '(recur (inc r) 0 acc)
+                                  :else (list 'let ['^objects a '(aget args i)
+                                                    'x call]
+                                              '(recur r (inc i)
+                                                      (if (nil? x) acc (unchecked-add acc (long (.hashCode ^Object x)))))))))))))
 
 (def ^:private ^"[J" sink (long-array 1))
 
-(defn- run-batch
-  "Call every argument vector reps times. The results feed a sink, so no call is dead code."
-  [call ds ^objects args ^long reps]
-  (let [n (alength args)]
-    (loop [r 0
-           i 0
-           acc 0]
-      (cond
-        (= r reps) (aset sink 0 (unchecked-add (aget sink 0) acc))
-        (= i n) (recur (inc r) 0 acc)
-        :else (let [x (call ds (aget args i))]
-                (recur r (inc i) (if (nil? x) acc (unchecked-add acc (long (.hashCode ^Object x))))))))))
+(defn- timing-loop
+  "Compile a timing loop for f alone. A loop that all plans shared was one call site for the
+  functions of all of them, and the JIT compiled it for the first plans that it saw: has-value of
+  one layout then differed by 3 to 15 % with its position among four plans. A class of its own
+  gives every case a call site that sees one function, as a call site of an application does."
+  [f reduce? arity]
+  (let [make (binding [*ns* (the-ns 'layout-descent.bench)]
+               (eval (loop-form reduce? arity)))]
+    (make f keep-leaf sink)))
 
 (defn- sample
   "Nanoseconds per call of one batch."
-  ^double [{:keys [call ds args reps]}]
+  ^double [{:keys [run ds args reps]}]
   (let [^objects args args
         reps (long reps)
         start (System/nanoTime)]
-    (run-batch call ds args reps)
+    (run ds args reps)
     (/ (double (- (System/nanoTime) start)) (double (* reps (alength args))))))
 
-(defn- warm
-  "Run a case until the JIT has had warm-ms of it, then set reps so one sample lasts target-ms."
-  [case {:keys [warm-ms target-ms]}]
-  (let [deadline (+ (System/nanoTime) (* 1000000 (long warm-ms)))
-        one (assoc case :reps 1)]
+(defn- spin
+  "Call a case for ms, three times at least."
+  [case ms]
+  (let [deadline (+ (System/nanoTime) (* 1000000 (long ms)))]
     (loop [runs 0]
-      (sample one)
+      (sample case)
       (when (or (< runs 2) (< (System/nanoTime) deadline))
-        (recur (inc runs))))
-    (let [batch-ns (* (double (apply min (repeatedly 3 #(sample one)))) (alength ^objects (:args case)))]
-      (assoc case :reps (max 1 (long (/ (* 1000000.0 (long target-ms)) (max 1.0 batch-ns))))))))
+        (recur (inc runs))))))
+
+(defn- warm
+  "Warm a case for warm-ms, then set reps so one sample lasts target-ms. The first third runs in a
+  loop that is thrown away, so the JIT compiles the function by itself before it compiles the loop
+  that is timed. When the two compilations raced, the loop sometimes got its own copy of the
+  function: has-value of one plan then took 13.7 ns in place of 11.9 ns."
+  [case {:keys [warm-ms target-ms]}]
+  (let [first-ms (quot (long warm-ms) 3)
+        _ (spin (assoc case :run ((:loop case)) :reps 1) first-ms)
+        one (assoc case :run ((:loop case)) :reps 1)
+        _ (spin one (- (long warm-ms) first-ms))
+        batch-ns (* (double (apply min (repeatedly 3 #(sample one)))) (alength ^objects (:args case)))]
+    (assoc one :reps (max 1 (long (/ (* 1000000.0 (long target-ms)) (max 1.0 batch-ns)))))))
 
 (defn- median [xs]
   (let [v (vec (sort xs))
@@ -79,12 +90,6 @@
     (if (odd? n)
       (double (nth v (quot n 2)))
       (/ (+ (double (nth v (quot n 2))) (double (nth v (dec (quot n 2))))) 2.0))))
-
-(defn- spread
-  "The median absolute deviation."
-  [xs]
-  (let [m (median xs)]
-    (median (map #(Math/abs (- (double %) m)) xs))))
 
 (defn- check-sample
   "Compare the first arguments of every pattern with the model before any timing."
@@ -114,19 +119,31 @@
                       {:id id
                        :ds ds
                        :args (object-array (map object-array args))
-                       :call (invoker (get (:fns layout) id)
-                                      (and (nil? (:fold pattern)) (some? (some #{:scan} (:bind pattern))))
-                                      (count (first args)))}))
+                       :loop (let [f (get (:fns layout) id)
+                                   reduce? (and (nil? (:fold pattern)) (some? (some #{:scan} (:bind pattern))))
+                                   arity (count (first args))]
+                               #(timing-loop f reduce? arity))}))
                   (:patterns plan))}))
+
+(defn- center
+  "The time and the spread of one case from the samples of each generation. The time is the lowest
+  median of a generation: a compilation can make the code slower than it is, not faster. The
+  spread is the median distance of a sample from that time, so it grows when the generations
+  disagree."
+  [generations]
+  (let [medians (mapv median generations)
+        ns (double (apply min medians))]
+    {:ns ns
+     :spread (median (map #(Math/abs (- (double %) ns)) (apply concat generations)))}))
 
 (defn- summarize [plan prepared times]
   (let [weights (:weights (:workload plan))
         total (double (reduce + 0 (vals weights)))
         rows (mapv (fn [{:keys [id reps]}]
-                     (let [xs (get times [(:hash prepared) id])]
+                     (let [{:keys [ns spread]} (center (get times [(:hash prepared) id]))]
                        {:pattern id
-                        :ns (median xs)
-                        :spread (spread xs)
+                        :ns ns
+                        :spread spread
                         :weight (get weights id)
                         :order (get (:serve plan) id)
                         :reps reps}))
@@ -144,16 +161,35 @@
 
 (def ^:private candidate-batch-size 4)
 
-(defn- measure-batch [plans data samples opts entries seed]
+(defn- generation
+  "Compile every plan again, warm its cases and take `rounds` samples of each in interleaved
+  rounds. Plan `g` is warmed first. Returns the plans without their data and the samples by
+  [hash pattern]."
+  [plans data samples opts g rounds]
   (let [prepared (mapv #(prepare % data samples) plans)
         _ (System/gc)
-        warmed (mapv (fn [p] (update p :cases (fn [cases] (mapv #(warm % opts) cases)))) prepared)
+        n (count plans)
+        warmed (reduce (fn [ps i] (update-in ps [i :cases] (fn [cases] (mapv #(warm % opts) cases))))
+                       prepared
+                       (map #(mod (+ (long g) (long %)) n) (range n)))
         times (reduce (fn [acc [p case]]
                         (update acc [(:hash p) (:id case)] (fnil conj []) (sample case)))
                       {}
-                      (for [_ (range (:rounds opts)) p warmed case (:cases p)] [p case]))]
+                      (for [_ (range rounds) p warmed case (:cases p)] [p case]))]
+    {:prepared (mapv (fn [p] (update p :cases (fn [cases] (mapv #(select-keys % [:id :reps]) cases)))) warmed)
+     :times times}))
+
+(defn- measure-batch
+  "Time the plans over :generations compilations. One compilation of one layout can be slower than
+  another of the same layout, and the first case that a compilation warms is so most often. So
+  each generation gets new classes and warms another plan first, and `center` takes the fastest."
+  [plans data samples opts entries seed]
+  (let [k (max 1 (long (:generations opts)))
+        rounds (max 2 (long (Math/ceil (/ (double (:rounds opts)) k))))
+        generations (mapv #(generation plans data samples opts % rounds) (range k))
+        times (apply merge-with into (map (fn [g] (update-vals (:times g) vector)) generations))]
     (mapv (fn [plan p] (assoc (summarize plan p times) :entries entries :seed seed))
-          plans warmed)))
+          plans (:prepared (first generations)))))
 
 (defn measure
   "Time normal plans of one task. All layouts use the first plan's objective. Each candidate is

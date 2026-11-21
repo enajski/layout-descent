@@ -158,9 +158,11 @@ the next step. Exit code 2: wrong usage or an internal error.
 - **One task.** Costs compare only between plans with the same task hash. `accept` refuses a
   candidate of another task, with or without `--force`.
 - **Same data, interleaved rounds.** All plans of a measurement are built from one seeded
-  dataset, called with the same arguments, and timed in turn. The cost is the weighted median
-  ns for each call, plus `:ns-per-byte` times the estimated bytes. Both costs use the baseline’s
-  objective. Searches time candidates in bounded groups, each against its own baseline run.
+  dataset, called with the same arguments, and timed in turn. A measurement compiles the plans
+  three times and shares the rounds among these generations; each generation warms another plan
+  first. The time of a pattern is the lowest median of a generation, and its spread is the median
+  distance of a sample from that time. The cost is the weighted time for each call, plus
+  `:ns-per-byte` times the estimated bytes. Both costs use the baseline’s objective. Searches time candidates in bounded groups, each against its own baseline run.
 - **A verdict needs a clear difference.** `better` and `worse` need at least `:min-gain` and more
   than three times the summed spread of the samples. Everything else is `no-change`, which says
   nothing about direction: the sign of `gain` is then noise.
@@ -220,7 +222,7 @@ outward, including calls through namespace aliases. It does not load the applica
 ```sh
 clojure -M:cli flow test/fixtures/flow --operation shop.order/settle
 clojure -M:cli flow test/fixtures/flow --operation board.game/act   # original .cljs sources
-clojure -M:cli flow src --operation layout-descent.bench/summarize --save /tmp/summarize.json
+clojure -M:cli flow src --operation layout-descent.bench/center --save /tmp/center.json
 ```
 
 - **Follow an operation:** `steps` are graph nodes with an `id`, `kind`, `via`, enclosing function
@@ -233,8 +235,8 @@ clojure -M:cli flow src --operation layout-descent.bench/summarize --save /tmp/s
   sale price; `:amount` is a new fact whose input is the multiplication, not another name for price.
   A `write` means the value crossed a boundary and its origin is not known.
 - **Ask a layout question:** `iterate`, `collect`, `inspect`, `pass` and `return` show how values move
-  apart from their use in a calculation. For example, in `bench/summarize` the same sample vector goes
-  to `median` directly and to `median` inside `spread`. Before changing that, measure the frequency,
+  apart from their use in a calculation. For example, in `bench/center` the samples go to `median`
+  one generation at a time, and all together to the `median` of their distances. Before changing that, measure the frequency,
   time and allocation of the whole operation and check that both its center and spread are unchanged.
 
 The trace uses one language (`language`): `.clj` or `.cljs` plus that side of `.cljc`. There is no need
@@ -329,10 +331,11 @@ python3 test/extension_test.py   # the Vis entry file, with a stub of the SDK
   the task, not a replay of production traffic or of real data.
 - Call sites are not rewritten for you. `facts` gives the sites and `status` the calls.
 - Plans are measured and emitted for the JVM only.
-- The noise of a verdict is the spread inside one run. Two runs can time the same layout much
-  further apart than that; the cause is not known. For one pair of plans of a case study, 13 runs
-  gave gains from -12 % to +16 %, with `:min-gain` at 5 %. Repeat `evaluate` before you act on a
-  gain of that size, and read runs that disagree as `no-change`.
+- The time of a pattern is that of the fastest of three compilations in one process. The JIT can
+  compile one layout to code of another speed in another compilation: a CSF scan took 21 to 31 ns
+  with the same inlining decisions, and the cause of that is not known. The spread grows when the
+  generations disagree, so such a pattern gives `no-change` more often. Repeat `evaluate` before
+  you act on a gain near `:min-gain`, and read runs that disagree as `no-change`.
 - `:bytes` is an estimate from entry counts, not a heap measurement.
 - At most four levels. One leaf type for each plan.
 - `neighbors` proposes an order only when it gives some pattern a longer bound prefix.

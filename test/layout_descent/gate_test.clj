@@ -62,6 +62,12 @@
     (is (= 'layout-descent.generated.risk (gate/source-ns text)))
     (is (= 'my.app.layout (gate/source-ns (emit/source plan {:ns 'my.app.layout}))))))
 
+(deftest a-scan-allocates-its-cell-directly
+  (let [text (emit/source (fx/normal fx/small-risk))]
+    (is (nil? (re-find #"\((object|long|double)-array " text))
+        "these call a method that the JIT stops inlining, and the cell is then allocated on every call")
+    (is (= 3 (count (re-seq #"cell \(java.lang.reflect.Array/newInstance " text))))))
+
 (defn- mutate [text old new]
   (let [changed (str/replace-first text old new)]
     (assert (not= text changed) (str "The mutation target is gone: " old))

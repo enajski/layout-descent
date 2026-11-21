@@ -46,5 +46,9 @@ format, the commands and the rules of the search.
   ids must not go to the output, because the key conversion would change the ids: use a list.
 - A new command needs an entry in `cli/commands` and `flags-of`, a hint for each new error code,
   a method in the Vis entry file, and a row in README.md.
+- A time must not depend on the other plans of a run. Each timed function has a loop class of its
+  own (`bench/timing-loop`), and emitted code calls no large shared method on its hot path:
+  `gate_test.clj` pins the cell of a scan. The JIT stops inlining such a method once it has
+  compiled it, and the layouts compiled later are slower.
 - A new format needs a builder in `rt`, an emitter in `emit`, an entry in `plan/formats`, and no
   change in `model`.

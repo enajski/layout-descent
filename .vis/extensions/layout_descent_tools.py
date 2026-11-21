@@ -49,14 +49,13 @@ Rules:
 - Do not change :workload or :objective to make a candidate win. They are the user's statement of
   the task: ask the user.
 - Call these tools, not the command line in a shell. Each call starts a JVM: seconds for most,
-  about a minute for `descend` on 25,000 entries. The tool waits up to 30 minutes. To keep an answer
+  about two minutes for `descend` on 30,000 entries. The tool waits up to 30 minutes. To keep an answer
   as a file, pass `save`; do not redirect a shell command.
 - Read a plan and its journal with `descent.status`, `descent.report` and `descent.journal`. Do not
   parse the EDN files.
 - A `no-change` verdict supports no claim of direction. Do not say which of the two plans is faster.
 - Report the numbers of one run: one `descend`, `evaluate` or `measure` answer for each table.
-- Two runs can time one layout much further apart than the noise of one run: a gain of 0.15 has
-  changed sign between runs. For a gain of that size, run `descent.evaluate` again before you
+- A verdict is one run. For a gain near :min-gain, run `descent.evaluate` again before you
   report a direction, and report `no-change` when the runs disagree.
 - When `sensitivity.depends_on_weights` is true, other :weights can reverse the verdict. Say so,
   with the smallest `flip_factor`. When the :weights are your estimate, give the range of the
@@ -335,7 +334,7 @@ class Descent:
         self,
         plans: Annotated[list[str], "Plan files of one task; one is enough"],
         rounds: Annotated[int | None, "Timed rounds for each pattern; the default is 15"] = None,
-        warm_ms: Annotated[int | None, "Warm-up for each pattern in milliseconds; the default is 150"] = None,
+        warm_ms: Annotated[int | None, "Warm-up for each pattern in each of three compilations, in milliseconds; the default is 150"] = None,
         save: SavePath = None,
     ) -> dict[str, Any]:
         """Gate plans of one task and time them on the same data, with no verdict and no journal record.
@@ -379,7 +378,7 @@ class Descent:
         candidate: Annotated[str, "Path of the candidate plan"],
         against: Annotated[str, "Path of the plan that the candidate would replace"],
         rounds: Annotated[int | None, "Timed rounds for each pattern; the default is 15"] = None,
-        warm_ms: Annotated[int | None, "Warm-up for each pattern in milliseconds; the default is 150"] = None,
+        warm_ms: Annotated[int | None, "Warm-up for each pattern in each of three compilations, in milliseconds; the default is 150"] = None,
         save: SavePath = None,
     ) -> dict[str, Any]:
         """Gate both plans, time them on the same data and return the verdict.
@@ -405,7 +404,7 @@ class Descent:
         max_steps: Annotated[int, "The most moves to take"] = 4,
         out: Annotated[str | None, "File that receives the final candidate"] = None,
         rounds: Annotated[int | None, "Timed rounds for each pattern"] = None,
-        warm_ms: Annotated[int | None, "Warm-up for each pattern in milliseconds"] = None,
+        warm_ms: Annotated[int | None, "Warm-up for each pattern in each of three compilations, in milliseconds"] = None,
         save: SavePath = None,
     ) -> dict[str, Any]:
         """Take the best measured candidate of each step, again and again, until none is better.

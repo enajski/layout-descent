@@ -31,6 +31,14 @@
     :sum (str "(aset cell 0 (+ (aget cell 0) (" (if (= :double leaf) "double" "long") " " leaf-expr ")))")
     :count "(aset cell 0 (inc (aget cell 0)))"))
 
+(defn- new-cell
+  "The binding of the cell of a scan. `object-array` and `long-array` call a large method that takes
+  a size or a seq. Once the JIT has compiled that method by itself, it no longer inlines it, and
+  the cell is allocated on every call: a scan of 20 ns then takes 6 ns more. Array/newInstance with
+  a constant class is an allocation that the JIT can always remove."
+  [hint component size]
+  [(str "^" hint " cell") (str "(java.lang.reflect.Array/newInstance " component " (int " size "))")])
+
 (defn- add-to-cell [expr]
   (str "(aset cell 0 (+ (aget cell 0) " expr "))"))
 
@@ -180,9 +188,9 @@
                     (csf-bindings ctx idx body))
                   (case m
                     :point nil
-                    :reduce [["cell" "(object-array 2)"]]
-                    :sum [["cell" (if (= :double leaf) "(double-array 1)" "(long-array 1)")]]
-                    :count [["cell" "(long-array 1)"]]))
+                    :reduce [(new-cell "objects" "Object" 2)]
+                    :sum [(if (= :double leaf) (new-cell "doubles" "Double/TYPE" 1) (new-cell "longs" "Long/TYPE" 1))]
+                    :count [(new-cell "longs" "Long/TYPE" 1)]))
         sig (signature plan pattern)
         params (concat ["ds"]
                        (when (= :reduce m) ["f" "init"])

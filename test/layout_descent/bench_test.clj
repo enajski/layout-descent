@@ -21,6 +21,37 @@
       (let [priced (fn [s] (assoc s :cost (+ (double (:time-ns s)) (* 1.0 (double (:bytes s))))))]
         (is (= :worse (:verdict (bench/verdict (:objective base) (priced b) (priced c)))))))))
 
+(deftest the-time-is-the-fastest-generation
+  (let [center @(ns-resolve 'layout-descent.bench 'center)]
+    (testing "one slow compilation moves neither the time nor the spread"
+      (is (= {:ns 10.0 :spread 0.0} (center [[10.0 10.0 10.0] [14.0 14.0 14.0] [10.0 10.0 10.0]]))))
+    (testing "generations that disagree raise the spread"
+      (is (= {:ns 10.0 :spread 2.0} (center [[10.0 10.0 10.0] [12.0 12.0 12.0] [15.0 15.0 15.0]]))))))
+
+(deftest every-generation-compiles-again-and-warms-another-plan-first
+  (let [base (fx/normal fx/small-risk)
+        indexed (fx/with-order fx/small-risk [2 0 1] :csf [:feature-total])
+        prepare-var (ns-resolve 'layout-descent.bench 'prepare)
+        warm-var (ns-resolve 'layout-descent.bench 'warm)
+        prepare @prepare-var
+        warm @warm-var
+        calls (atom 0)
+        warmed (atom [])]
+    (with-redefs-fn {prepare-var (fn [plan data samples]
+                                   (let [p (prepare plan data samples)
+                                         owner {:hash (:hash p) :generation (quot (dec (long (swap! calls inc))) 2)}]
+                                     (update p :cases (fn [cases] (mapv #(assoc % :owner owner) cases)))))
+                     warm-var (fn [case opts]
+                                (swap! warmed conj (assoc (:owner case) :loop (class ((:loop case)))))
+                                (warm case opts))}
+      (fn []
+        (let [[b c] (bench/measure [base indexed] {:rounds 6 :generations 3 :warm-ms 10 :target-ms 1 :args 8})
+              firsts (mapv (comp :hash first) (partition-by :generation @warmed))]
+          (is (= 6 @calls) "two plans, three generations")
+          (is (= [(:hash b) (:hash c) (:hash b)] firsts))
+          (is (apply distinct? (map :loop @warmed)) "every loop is a class of its own")
+          (is (every? #(pos? (double (:ns %))) (mapcat :patterns [b c]))))))))
+
 (deftest plans-of-different-tasks-do-not-compare
   (let [base (fx/normal fx/small-risk)
         other (fx/normal (assoc-in fx/small-risk [:workload :seed] 8))]
