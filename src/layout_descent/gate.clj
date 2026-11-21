@@ -61,7 +61,7 @@
     [result @calls]))
 
 (defn- reduce? [pattern]
-  (and (nil? (:fold pattern)) (some #{:scan} (:bind pattern))))
+  (plan/reduce? pattern))
 
 (defn- answer
   "What a pattern returns, in a form that compares with =."
@@ -75,8 +75,7 @@
   [:threw (str (.getSimpleName (class e)) ": " (ex-message e))])
 
 (defn- clip [x]
-  (let [s (pr-str x)]
-    (if (> (count s) 240) (str (subs s 0 240) "…") s)))
+  (plan/clip 240 x))
 
 (defn check-built
   "The disagreements between a built dataset and the model on one dataset. samples maps a pattern

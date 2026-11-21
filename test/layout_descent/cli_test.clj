@@ -393,3 +393,15 @@
       (is (seq as))
       (is (= (count as) (count bs)))
       (is (not-any? as bs)))))
+
+(deftest small-prices-and-weights-read-back-exactly
+  (let [dir (temp-dir)
+        path (str (io/file dir "plan.edn"))
+        input (-> fx/small-risk
+                  (assoc :objective {:ns-per-byte 0.0001})
+                  (assoc-in [:workload :weights :value] 0.0004))]
+    (spit path (pr-str input))
+    (let [answer (run "status" path)
+          value (first (filter #(= "value" (get % "pattern")) (get answer "patterns")))]
+      (is (= 0.0001 (get-in answer ["objective" "ns_per_byte"])))
+      (is (= 0.0004 (get value "weight"))))))

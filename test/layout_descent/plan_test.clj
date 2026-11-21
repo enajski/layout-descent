@@ -208,3 +208,17 @@
     (testing "the ends of the split are the two plans"
       (is (= (plan/plan-hash base) (plan/plan-hash (plan/split base csf []))))
       (is (= (plan/plan-hash csf) (plan/plan-hash (plan/split base csf (map :id (:patterns base)))))))))
+
+(deftest shared-helpers
+  (testing "text-digest is one SHA-256 prefix: 12 for hashes, 16 for source digests"
+    (is (= 12 (count (plan/text-digest "abc"))))
+    (is (= 16 (count (plan/text-digest "abc" 16))))
+    (is (= (plan/text-digest "abc") (subs (plan/text-digest "abc" 16) 0 12))))
+  (testing "reduce? is a scan without a fold"
+    (is (true? (plan/reduce? {:bind [:key :scan]})))
+    (is (false? (plan/reduce? {:bind [:key :scan] :fold :sum})))
+    (is (false? (plan/reduce? {:bind [:key :key]}))))
+  (testing "clip cuts long forms with an ellipsis"
+    (is (= "1" (plan/clip 60 1)))
+    (is (= (str (subs (pr-str (vec (range 100))) 0 60) "…")
+           (plan/clip 60 (vec (range 100)))))))

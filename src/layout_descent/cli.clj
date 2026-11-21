@@ -13,8 +13,6 @@
   (:import (java.io File)
            (java.nio.channels FileChannel)
            (java.nio.file Files LinkOption OpenOption Path StandardOpenOption)
-           (java.nio.charset StandardCharsets)
-           (java.security MessageDigest)
            (java.util LinkedHashMap UUID)))
 
 (def commands
@@ -253,8 +251,7 @@
     :else :stale))
 
 (defn- text-digest [^String text]
-  (let [bytes (.digest (MessageDigest/getInstance "SHA-256") (.getBytes text StandardCharsets/UTF_8))]
-    (subs (apply str (map #(format "%02x" %) bytes)) 0 16)))
+  (plan/text-digest text 16))
 
 (def ^:private stale-causes
   {:plan-changed "The layout decisions of the plan file changed outside accept."
@@ -815,12 +812,22 @@
 (defn- json-key [k]
   (if (keyword? k) (str/replace (name k) "-" "_") (str k)))
 
+(defn- exact
+  "Prices and weights read back exactly: bigdec keeps a small double from rounding to 0.0."
+  [x]
+  (cond
+    (double? x) (when (Double/isFinite x) (bigdec x))
+    (map? x) (update-vals x exact)
+    (sequential? x) (mapv exact x)
+    :else x))
+
 (defn- jsonable
-  "Clojure data as JSON data: snake_case keys, keywords and symbols as their text."
+  "Clojure data as JSON data: snake_case keys, keywords and symbols as their text. Doubles round
+  to three places, except under :objective, :weights and :weight, which must read back exactly."
   [x]
   (cond
     (map? x) (let [m (LinkedHashMap.)]
-               (doseq [[k v] x] (.put m (json-key k) (jsonable v)))
+               (doseq [[k v] x] (.put m (json-key k) (jsonable (if (#{:objective :weights :weight} k) (exact v) v))))
                m)
     (keyword? x) (subs (str x) 1)
     (symbol? x) (str x)

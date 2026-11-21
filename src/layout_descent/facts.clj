@@ -5,7 +5,8 @@
   (:require [clj-kondo.core :as kondo]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [edamame.core :as edamame])
+            [edamame.core :as edamame]
+            [layout-descent.plan :as plan])
   (:import (java.nio.file Path)))
 
 (def accessors
@@ -38,8 +39,7 @@
    :readers (fn [_tag] identity)})
 
 (defn- clip [form]
-  (let [s (pr-str form)]
-    (if (> (count s) 60) (str (subs s 0 60) "…") s)))
+  (plan/clip 60 form))
 
 (def ^:private thread-first '#{-> some-> cond->})
 (def ^:private thread-last '#{->> some->> cond->>})

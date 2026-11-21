@@ -121,12 +121,12 @@
   (doseq [format [:hash :csf]
           perm [[0 1 2] [1 0 2]]]
     (let [plan (fx/normal (assoc (task :long) :orders [{:perm perm :format format}]))
-          data {:a {1 {"x" 10} Long/MIN_VALUE {"x" 20} Long/MAX_VALUE {"x" 30}}}
+          data {:a {1 {"x" 10} 2N {"x" 40} Long/MIN_VALUE {"x" 20} Long/MAX_VALUE {"x" 30}}}
           layout (gate/load-layout plan)
           ds ((:build layout) data)
           pattern (first (:patterns plan))
           point (get-in layout [:fns :point])]
-      (doseq [key [nil "1" 1.0 1.75 -1 1 (int 1) 1N (biginteger 1)
+      (doseq [key [nil "1" 1.0 1.75 -1 1 2 2N (int 1) 1N (biginteger 1)
                    Long/MIN_VALUE (bigint Long/MIN_VALUE) (dec' Long/MIN_VALUE)
                    Long/MAX_VALUE (biginteger Long/MAX_VALUE) (inc' Long/MAX_VALUE)]]
         (is (= (model/run plan pattern data [:a key "x"])
@@ -187,6 +187,9 @@
         code #(try (rt/build-dataset descriptor %) :built (catch clojure.lang.ExceptionInfo e (:code (ex-data e))))]
     (is (= :built (code {:a {1 1.0}})))
     (is (= :built (code {:a {(int 1) 1.0}})) "an Integer key is a :long key")
+    (is (= :built (code {:a {1N 1.0}})) "a BigInt in the long range is a :long key")
+    (is (= :built (code {:a {(biginteger 1) 1.0}})))
+    (is (= :bad-key (code {:a {(inc' Long/MAX_VALUE) 1.0}})) "outside the long range")
     (is (= :bad-key (code {"a" {1 1.0}})))
     (is (= :bad-key (code {:a {1.5 1.0}})))
     (is (= :bad-leaf (code {:a {1 1}})))

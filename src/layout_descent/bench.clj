@@ -138,7 +138,7 @@
                        :ds ds
                        :args (object-array (map object-array args))
                        :loop (let [f (get (:fns layout) id)
-                                   reduce? (and (nil? (:fold pattern)) (some? (some #{:scan} (:bind pattern))))
+                                   reduce? (plan/reduce? pattern)
                                    arity (count (first args))]
                                #(timing-loop f reduce? arity))}))
                   (:patterns plan))}))

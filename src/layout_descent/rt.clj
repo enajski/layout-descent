@@ -18,17 +18,18 @@
 (defn- bad [code message data]
   (throw (ex-info message (assoc data :code code))))
 
-(defn- check-key [type k path]
-  (case type
-    :long (if (int? k) (long k) (bad :bad-key (str "Key " (pr-str k) " at " path " is not an integer.") {:path path}))
-    :keyword (if (keyword? k) k (bad :bad-key (str "Key " (pr-str k) " at " path " is not a keyword.") {:path path}))
-    :string (if (string? k) k (bad :bad-key (str "Key " (pr-str k) " at " path " is not a string.") {:path path}))))
-
 (defn wide-long-key
   "Normalize a query outside the fixed-width integer types, or return nil for a miss."
   [k]
   (when (and (integer? k) (<= Long/MIN_VALUE k Long/MAX_VALUE))
     (long k)))
+
+(defn- check-key [type k path]
+  (case type
+    ;; Build accepts what a query and the plain map accept: a BigInt in the long range is a key.
+    :long (or (wide-long-key k) (bad :bad-key (str "Key " (pr-str k) " at " path " is not an integer.") {:path path}))
+    :keyword (if (keyword? k) k (bad :bad-key (str "Key " (pr-str k) " at " path " is not a keyword.") {:path path}))
+    :string (if (string? k) k (bad :bad-key (str "Key " (pr-str k) " at " path " is not a string.") {:path path}))))
 
 (defn- check-leaf [type v path]
   (if (case type
@@ -179,7 +180,8 @@
 
 (defn- hash-bytes ^long [^HashMap node ^long depth ^long n]
   (if (= depth (dec n))
-    (+ 48 (* 56 (.size node)))
+    ;; Per leaf entry: Node and key (56), plus the boxed leaf value (24).
+    (+ 48 (* 80 (.size node)))
     (reduce (fn [^long acc child] (+ acc (hash-bytes child (inc depth) n)))
             (+ 48 (* 40 (.size node)))
             (.values node))))
@@ -187,10 +189,13 @@
 (defn- csf-bytes ^long [^Csf c]
   (let [ints-bytes (fn [^objects arrays] (reduce + 0 (map #(* 4 (alength ^ints %)) arrays)))
         leaves (.-leaves c)
-        leaf-bytes (* (java.lang.reflect.Array/getLength leaves) (if (instance? (Class/forName "[Ljava.lang.Object;") leaves) 24 8))]
+        leaf-bytes (* (java.lang.reflect.Array/getLength leaves) (if (instance? (Class/forName "[Ljava.lang.Object;") leaves) 24 8))
+        ;; A dict entry is a Node and an Integer id; the key object itself is counted in labels.
+        dict-bytes (reduce + 0 (map (fn [^HashMap dict] (+ 48 (* 48 (.size dict)))) (.-dicts c)))]
     (long (+ (ints-bytes (.-ids c))
              (ints-bytes (.-ptrs c))
              leaf-bytes
+             dict-bytes
              (reduce + 0 (map #(* 64 (alength ^objects %)) (.-labels c)))))))
 
 (defn estimate-bytes

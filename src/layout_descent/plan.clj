@@ -39,6 +39,11 @@
   [perm bind]
   (count (take-while #(= :key (nth bind %)) perm)))
 
+(defn reduce?
+  "A pattern that scans without a fold: its reader may stop after the first row."
+  [pattern]
+  (and (nil? (:fold pattern)) (some? (some #{:scan} (:bind pattern)))))
+
 (defn best-order
   "Index of the order that fixes the longest prefix for bind; the lowest index wins a tie."
   [orders bind]
@@ -285,19 +290,28 @@
   (assoc (select-keys (layout-key plan) [:levels :leaf :patterns])
          :workload (:workload plan)))
 
-(defn- short-digest [text]
-  (let [digest (.digest (MessageDigest/getInstance "SHA-256") (.getBytes ^String text StandardCharsets/UTF_8))]
-    (subs (apply str (map #(format "%02x" %) digest)) 0 12)))
+(defn clip
+  "pr-str of x, cut to limit characters with an ellipsis."
+  [limit x]
+  (let [s (pr-str x)]
+    (if (> (count s) limit) (str (subs s 0 limit) "…") s)))
+
+(defn text-digest
+  "The hex prefix of the SHA-256 of text: 12 characters for plan and task hashes, 16 for source digests."
+  ([text] (text-digest text 12))
+  ([text length]
+   (let [digest (.digest (MessageDigest/getInstance "SHA-256") (.getBytes ^String text StandardCharsets/UTF_8))]
+     (subs (apply str (map #(format "%02x" %) digest)) 0 length))))
 
 (defn plan-hash
   "Twelve hex digits that identify the layout decisions of a plan."
   [plan]
-  (short-digest (pr-str (layout-key (normalize plan)))))
+  (text-digest (pr-str (layout-key (normalize plan)))))
 
 (defn task-hash
   "Twelve hex digits that identify the task of a plan: its levels, leaf, patterns and workload."
   [plan]
-  (short-digest (pr-str (task-key (normalize plan)))))
+  (text-digest (pr-str (task-key (normalize plan)))))
 
 (defn warnings
   "Notes about a valid normal plan that do not block it."
