@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Layout Descent × rotten — case study</title>
+<style>
+:root{--bg:#0e1116;--panel:#161b23;--panel2:#1c2330;--line:#2a3342;--text:#dce3ec;--dim:#8b96a8;
+--accent:#5cc8ff;--good:#3fb96f;--bad:#e05d5d;--mid:#9aa4b2;--gold:#e8b44a;
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1020px;margin:0 auto;padding:28px 20px 80px}
+h1{font-size:26px;margin:0 0 4px}
+h2{font-size:19px;margin:42px 0 12px;border-bottom:1px solid var(--line);padding-bottom:8px}
+h3{font-size:15px;margin:16px 0 8px}
+.sub{color:var(--dim);margin:0 0 18px}
+code,.mono{font-family:var(--mono);font-size:.92em}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:12px 0}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin:18px 0}
+.stat{flex:1 1 150px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.stat .v{font-size:21px;font-weight:650;font-family:var(--mono)}
+.stat .k{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+.good{color:var(--good)}.bad{color:var(--bad)}.mid{color:var(--mid)}.accent{color:var(--accent)}.gold{color:var(--gold)}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+td.num,th.num{text-align:right;font-family:var(--mono)}
+.chip{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:2px 12px;margin:2px 4px 2px 0;font-family:var(--mono);font-size:13px}
+.pill{display:inline-block;border-radius:4px;padding:1px 8px;font-size:12px;font-weight:600;font-family:var(--mono)}
+.pill.better{background:#12351f;color:var(--good)}.pill.worse{background:#3a1a1a;color:var(--bad)}
+.pill.no-change{background:#2a2f38;color:var(--mid)}
+button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px 14px;cursor:pointer;font-size:14px}
+button:hover{border-color:var(--accent)}
+button.active{background:#12303a;border-color:var(--accent);color:var(--accent)}
+.bar-row{display:grid;grid-template-columns:250px 1fr 120px;gap:10px;align-items:center;margin:7px 0}
+.bar-label{font-family:var(--mono);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar-track{background:var(--panel2);border-radius:5px;height:22px;overflow:hidden}
+.bar-fill{height:100%;border-radius:5px;min-width:3px;transition:width .35s ease}
+.bar-val{font-family:var(--mono);font-size:12.5px;text-align:right;color:var(--dim)}
+.axis{display:flex;justify-content:space-between;color:var(--dim);font-family:var(--mono);font-size:11px;margin:4px 0 0 260px;padding-right:130px}
+details{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:10px 0}
+summary{cursor:pointer;font-weight:600;color:var(--accent)}
+pre{background:#0a0d12;border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.5;color:#c7d2e0}
+.note{color:var(--dim);font-size:13.5px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:800px){.grid2{grid-template-columns:1fr}.bar-row{grid-template-columns:150px 1fr 90px}.axis{margin-left:160px;padding-right:100px}}
+.jrec{border-left:3px solid var(--bad);padding:6px 12px;margin:8px 0;font-family:var(--mono);font-size:12.5px;background:var(--panel2);border-radius:0 6px 6px 0}
+.flip{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}
+.flip .card{flex:1 1 220px;margin:0;text-align:center}
+.flip .v{font-size:26px;font-weight:700;font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Layout Descent × <span class="accent">rotten</span></h1>
+<p class="sub">A rot.js roguelike's world map, measured · <code>github.com/enajski/rotten</code> · task <code id="task-hash"></code> · the search keeps the layout the game already has</p>
+<div class="stats" id="stats"></div>
+
+<h2>1 · The task, grounded in the game</h2>
+<div class="card">
+<p style="margin-top:0"><code>rotten.db</code> keeps <code>world = {[x y] tile}</code> — a <b>dense 30×30 maze grid</b>
+(<code>generate-maze</code> fills every cell). The render loop is point-dominated: each frame, FOV
+(radius 10, ~314 cells) reads each visible tile ~3 times (<code>get-tile</code>, <code>get world</code>,
+<code>get-tile-entities</code>), then <code>display-seen</code> reduces the <b>whole world once</b>.
+A* pathfinding adds more point reads between frames.</p>
+<div id="levels"></div>
+<table style="margin-top:10px"><thead><tr><th>Pattern</th><th>Bind</th><th>Call</th><th>Sites</th></tr></thead><tbody id="pattern-rows"></tbody></table>
+<p class="note" id="workload-line"></p>
+<p class="note" id="notes-line"></p>
+</div>
+<div class="grid2" id="game-src"></div>
+
+<h2>2 · The descent</h2>
+<div class="card" id="descent-card"></div>
+
+<h2>3 · Per-pattern evidence</h2>
+<p class="note">One <code>evaluate</code> run: same seeded dataset, interleaved rounds, weighted median. Toggle the view; hover for exact values.</p>
+<div style="margin:10px 0" id="pattern-toggles"></div>
+<div class="card" id="compare"></div>
+<div class="grid2">
+<div class="card"><h3 style="margin-top:0">ns per call, by pattern</h3><div id="per-pattern"></div>
+<p class="note">csf scans the dense grid <b class="good">2× faster</b> (contiguous span vs pointer-chasing),
+but its point lookup binary-searches 30 sorted y-entries — <b class="bad">56% slower</b> than two hash gets.</p></div>
+<div class="card"><h3 style="margin-top:0">Estimated bytes</h3><div id="memory"></div>
+<p class="note">csf holds the same 900 tiles in <b class="good">45% less memory</b>. At <code>:ns-per-byte 0</code> memory is free, so this buys no verdict — pricing memory would move the trade-off.</p></div>
+</div>
+
+<h2>4 · Sensitivity — the verdict depends on the frame mix</h2>
+<div class="card">
+<p style="margin-top:0"><code>sensitivity.depends_on_weights = true</code>: the candidate wins on scans and loses on points.
+Other <code>:weights</code> can reverse the verdict. The smallest flips:</p>
+<div class="flip" id="flips"></div>
+<p id="flip-text"></p>
+<p class="note">The 900:1 weights model one rendered frame of this game. A workload with ~6× more full-world scans per point read
+(e.g. many entities re-planning routes over a smaller FOV), or a memory-priced objective, would favor csf.
+The task was not changed to make a candidate win.</p>
+</div>
+
+<h2>5 · Outcome</h2>
+<div class="card">
+<p style="margin-top:0"><span class="pill no-change">no-change</span> <b>Descent keeps the starting plan</b> — one order <code>[0 1] :hash</code>,
+the layout equivalent of the persistent nested map the game already uses. No neighbor is better, so nothing is accepted
+(<code>accept</code> requires a measured <code>better</code> verdict). The gate passed (293 checks, 0 mismatches, no warnings)
+and the emitted namespace is available as a preview.</p>
+<p style="margin-bottom:0" class="note">For this dense, point-dominated render loop, the naive map is not naive: it is the measured optimum of the single-decision search space.
+The interesting result is the trade-off csf offers — 2× scans, 45% less memory — and exactly how far the frame mix must shift before it wins.</p>
+</div>
+
+<h2>6 · Artifacts & raw traces</h2>
+<details><summary>plan.edn (kept, hash a232b4564182)</summary><pre id="plan-src"></pre></details>
+<details><summary>Emitted namespace (preview — only accept writes the configured path)</summary><pre id="emitted-src"></pre></details>
+<details><summary>Journal</summary><div id="journal"></div></details>
+<details><summary>Full descent JSON</summary><pre id="descend-json"></pre></details>
+<p class="note" style="margin-top:30px">Case study files: <code>layout-descent/case-studies/rotten/</code> ·
+measurements: 15 interleaved rounds · costs are weighted medians, bytes are estimates from entry counts.</p>
+</div>
+<script>
+const DATA = {"repo": "https://github.com/enajski/rotten", "task": {"name": "rotten-world", "task": "1a834223fff3", "hash": "a232b4564182", "levels": [{"id": "x", "type": "long"}, {"id": "y", "type": "long"}], "leaf": "object", "objective": {"ns_per_byte": 0.0, "min_gain": 0.05}}, "patterns": [{"bound_levels": 2, "returns": "the leaf, or nil when the path is absent", "call": "(tile ds x y)", "bind": ["key", "key"], "perm": [0, 1], "fold": null, "order": 0, "pattern": "tile", "indexed_levels": 2, "weight": 900, "format": "hash"}, {"bound_levels": 0, "returns": "the unordered reduction; f is called as (f acc x y leaf). Use an order-independent reducer; (reduced value) stops the scan and returns value", "call": "(seen-scan ds f init)", "bind": ["scan", "scan"], "perm": [0, 1], "fold": null, "order": 0, "pattern": "seen-scan", "indexed_levels": 0, "weight": 1, "format": "hash"}], "workload": {"fanout": [30, 30], "fill": [1.0, 1.0], "seed": 7, "weights": {"tile": 900, "seen-scan": 1}}, "notes": "Vector keys [x y] modeled as two long levels; tile maps as object leaves. Writes (move-entity, mark-tile-as-seen) stay on the persistent map; the dataset is a read-only render/query snapshot. Weights approximate one rendered frame: FOV radius 10 ~ 314 cells x ~3 tile reads ~ 900 point reads : 1 full-world scan.", "plans": [{"hash": "a232b4564182", "label": "Kept: [0 1] :hash (persistent-map equivalent)", "role": "final", "cost": 14.337, "time_ns": 14.337, "noise": 0.024, "bytes": 53088, "entries": 900, "patterns": [{"pattern": "tile", "ns": 12.038, "spread": 0.021, "weight": 900, "order": 0, "reps": 5050}, {"pattern": "seen-scan", "ns": 2083.431, "spread": 1.993, "weight": 1, "order": 0, "reps": 1714}]}, {"hash": "27c6a579b177", "label": "Candidate: [0 1] :csf", "role": "rejected", "cost": 19.939, "time_ns": 19.939, "noise": 0.032, "bytes": 29284, "entries": 900, "patterns": [{"pattern": "tile", "ns": 18.776, "spread": 0.031, "weight": 900, "order": 0, "reps": 3311}, {"pattern": "seen-scan", "ns": 1066.825, "spread": 1.107, "weight": 1, "order": 0, "reps": 3690}]}], "descend": {"ok": true, "command": "descend", "start": "a232b4564182", "final": "a232b4564182", "verdict": "no-change", "gain": null, "measured": null, "steps": [{"from": "a232b4564182", "cost": 14.587, "bytes": 53088, "patterns": [{"pattern": "tile", "ns": 12.3}, {"pattern": "seen-scan", "ns": 2072.888}], "candidates": [{"hash": "27c6a579b177", "move": {"op": "set-format", "order": 0, "format": "csf"}, "cost": 20.268, "bytes": 29284, "verdict": "worse", "patterns": [{"pattern": "tile", "ns": 19.107}, {"pattern": "seen-scan", "ns": 1065.366}]}], "chosen": null, "stopped": "No neighbor is better."}], "stopped": "No neighbor is better.", "candidate": null, "journal": "/Users/wojtekfranke/workspace/layout-descent/case-studies/rotten/plan.edn.journal", "next": "Keep the plan. A hand-written candidate may still be better: neighbors are one decision away only."}, "evaluate": {"verdict": "worse", "gain": -0.391, "delta_ns": -5.602, "noise_ns": 0.167, "sensitivity": {"depends_on_weights": true, "summary": "The candidate wins on some patterns and loses on others: the verdict depends on :weights. flip_factor is the multiple of one weight that reverses the sign of the difference.", "memory_ns": 0.0, "patterns": [{"pattern": "tile", "weight": 900, "delta_ns": -6.738, "net_ns": -6.738, "noise_ns": 0.157, "effect": "worse", "flip_factor": 0.168}, {"pattern": "seen-scan", "weight": 1, "delta_ns": 1016.606, "net_ns": 1016.606, "noise_ns": 9.299, "effect": "better", "flip_factor": 5.965}]}, "next": "Keep the plan. Try another candidate."}, "journal": [{"baseline": "a232b4564182", "holdout": null, "candidate": "27c6a579b177", "task": "1a834223fff3", "candidate-cost": 19.938808020343682, "patterns": [{"pattern": "tile", "baseline-ns": 12.038081683168317, "candidate-ns": 18.77560121564482}, {"pattern": "seen-scan", "baseline-ns": 2083.4305717619604, "candidate-ns": 1066.8249322493225}], "op": "evaluate", "at": "2026-11-20T19:35:10.115781Z", "gain": -0.3907166401920106, "verdict": "worse", "baseline-bytes": 53088, "objective": {"ns-per-byte": 0.0, "min-gain": 0.05}, "baseline-cost": 14.337074457950552, "rounds": 15, "candidate-bytes": 29284}], "sources": {"plan": "{:layout/version 1\n :name rotten-world\n ;; Task grounded in rotten (github.com/enajski/rotten), a rot.js roguelike:\n ;; db.cljs world = {[x y] tile}, a dense 30x30 maze grid (generate-maze,\n ;; core.cljs:217). The vector coordinate key is modeled as two :long levels.\n ;; Leaf is the tile map {:tile/kind ... :tile/walkable? ...} -> :object.\n ;; Writes (move-entity, mark-tile-as-seen, ...) stay on the persistent map;\n ;; the dataset is a read-only render/query snapshot, rebuilt after writes.\n :levels [{:id :x :type :long}\n          {:id :y :type :long}]\n :leaf {:type :object}\n :patterns [{:id :tile :bind [:key :key]\n             :doc \"point tile read: get-tile, is-walkable?, light-passes?, FOV draw\"\n             :sites [\"db.cljs:56 get-tile\" \"core.cljs:44 is-walkable?\"\n                     \"core.cljs:200 light-passes?\" \"core.cljs:285 with-360-fov\"]}\n            {:id :seen-scan :bind [:scan :scan]\n             :doc \"full world reduction: display-seen each frame; also the filter of get-random-empty-location\"\n             :sites [\"core.cljs:296 display-seen\" \"core.cljs:49 get-random-empty-location\"]}]\n ;; Baseline: the persistent nested map the game actually uses.\n :orders [{:perm [0 1] :format :hash}]\n ;; Per frame: FOV radius 10 ~ 314 cells x ~3 tile reads ~ 900 point reads,\n ;; plus one full-world scan (display-seen). A* and random-location add\n ;; occasional points/scans between frames; the frame mix dominates.\n :workload {:fanout [30 30]\n            :fill [1.0 1.0]\n            :seed 7\n            :weights {:tile 900 :seen-scan 1}}\n :objective {:min-gain 0.05 :ns-per-byte 0.0}\n :emit {:ns rotten-world.layout\n        :path \"src/rotten_world/layout.clj\"}\n :notes \"rotten case study: dense 30x30 grid, point-dominated render loop.\n         Vector keys [x y] modeled as two long levels; tile maps as object leaves.\n         Weights approximate one rendered frame (900 FOV/path point reads : 1 full scan).\"}\n", "emitted": ";; GENERATED by layout-descent from plan a232b4564182. Do not edit: change the plan and emit again.\n(ns rotten-world.layout\n  \"Layout rotten-world, compiled from plan a232b4564182.\"\n  (:require [layout-descent.rt :as rt]))\n\n(set! *warn-on-reflection* true)\n\n(def plan-hash \"a232b4564182\")\n\n(def descriptor\n  '{:types [:long :long], :leaf :object, :orders [{:perm [0 1], :format :hash}]})\n\n(defn build\n  \"Compile a nested map into the dataset that the functions of this namespace read.\"\n  [data]\n  (rt/build-dataset descriptor data))\n\n(defn tile\n  \"Pattern :tile [:key :key], served by order 0 [0 1] :hash.\n  Returns the leaf, or nil when the path is absent.\"\n  {:arglists '([ds x y])}\n  [^layout_descent.rt.Dataset ds k0 k1]\n  (let [^java.util.HashMap n0 (aget ^objects (.-orders ds) 0)]\n    (let [n1 (.get ^java.util.HashMap n0 (if (int? k0) (long k0) (rt/wide-long-key k0)))]\n      (when-not (nil? n1)\n        (let [leaf (.get ^java.util.HashMap n1 (if (int? k1) (long k1) (rt/wide-long-key k1)))]\n          (when-not (nil? leaf)\n            leaf))))))\n\n(defn seen-scan\n  \"Pattern :seen-scan [:scan :scan], served by order 0 [0 1] :hash.\n  Returns the unordered reduction; f is called as (f acc x y leaf). Use an order-independent reducer; (reduced value) stops the scan and returns value.\"\n  {:arglists '([ds f init])}\n  [^layout_descent.rt.Dataset ds f init]\n  (let [^java.util.HashMap n0 (aget ^objects (.-orders ds) 0)\n        cell (object-array 2)]\n    (aset cell 0 init)\n    (let [it0 (.iterator (.entrySet ^java.util.HashMap n0))]\n      (while (and (nil? (aget cell 1)) (.hasNext it0))\n        (let [^java.util.Map$Entry e0 (.next it0)\n              s0 (.getKey e0)\n              n1 (.getValue e0)]\n          (let [it1 (.iterator (.entrySet ^java.util.HashMap n1))]\n            (while (and (nil? (aget cell 1)) (.hasNext it1))\n              (let [^java.util.Map$Entry e1 (.next it1)\n                    s1 (.getKey e1)\n                    leaf (.getValue e1)]\n                (let [next (f (aget cell 0) s0 s1 leaf)]\n                  (if (reduced? next)\n                    (do (aset cell 0 @next) (aset cell 1 true))\n                    (aset cell 0 next)))))))))\n    (aget cell 0)))\n", "db_get_tile": "(defn get-tile [x y]\n  (get-in @state [:world [x y]]))", "display_seen": "(defn display-seen [world]\n  (doseq [[[x y] tile] world]\n    (when (:tile/seen? tile)\n      (draw-tile x y tile)\n      (draw-seen-overlay x y))))", "fov": "(defn with-360-fov [origin-x origin-y range world]\n  (.compute FOVHandler origin-x origin-y range\n            (fn [x y r _visibility]\n              (when (db/get-tile x y)\n                (db/mark-tile-as-seen x y)\n                (draw-tile x y (get world [x y]))\n                (doseq [entity (db/get-tile-entities x y)]\n                  (draw-entity x y entity))))))"}};
+const $ = id => document.getElementById(id);
+const fmt = (v,d=1) => v>=1000 ? Math.round(v).toLocaleString("en-US") : v.toFixed(d);
+const PLANC = {final:"var(--good)", rejected:"var(--bad)"};
+function logBars(el, rows){
+  const vals = rows.map(r=>r.value).filter(v=>v>0);
+  const lo = Math.log10(Math.min(...vals)), hi = Math.log10(Math.max(...vals));
+  const span = Math.max(hi-lo,1e-9);
+  el.innerHTML = rows.map(r=>{
+    const w = Math.max(2, 100*(Math.log10(r.value)-lo)/span);
+    return `<div class="bar-row" title="${r.tip||''}"><div class="bar-label">${r.label}</div>
+    <div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${r.color}"></div></div>
+    <div class="bar-val">${fmt(r.value)} ns</div></div>`;
+  }).join("") + `<div class="axis"><span>10^${lo.toFixed(1)}</span><span>log scale</span><span>10^${hi.toFixed(1)}</span></div>`;
+}
+const P = DATA.plans, kept=P[0], csf=P[1];
+$("task-hash").textContent = DATA.task.task;
+$("stats").innerHTML = [
+  ["kept cost", fmt(kept.cost,2)+" ns", "good"],
+  ["csf candidate", fmt(csf.cost,2)+" ns (+"+(100*(csf.cost/kept.cost-1)).toFixed(0)+"%)", "bad"],
+  ["moves accepted", "0", "accent"],
+  ["gate checks", "293 ✓", "accent"],
+  ["scan speedup (csf)", (kept.patterns[1].ns/csf.patterns[1].ns).toFixed(2)+"×", "gold"],
+].map(([k,v,c])=>`<div class="stat"><div class="v ${c}">${v}</div><div class="k">${k}</div></div>`).join("");
+$("levels").innerHTML = DATA.task.levels.map((l,i)=>`<span class="chip">level ${i}: ${l.id} : ${l.type}</span>`).join("") +
+  `<span class="chip">leaf : ${DATA.task.leaf} (tile map)</span><span class="chip">order [0 1] :hash</span>`;
+const sites = {tile:"db.cljs:56 get-tile · core.cljs:44 is-walkable? · :200 light-passes? · :285 FOV",
+               "seen-scan":"core.cljs:296 display-seen · :49 get-random-empty-location"};
+$("pattern-rows").innerHTML = DATA.patterns.map(p=>`<tr><td class="mono accent">${p.pattern}</td>
+  <td class="mono">[${p.bind.join(" ")}]</td><td class="mono">${p.call}</td><td class="note">${sites[p.pattern]||""}</td></tr>`).join("");
+const wl = DATA.workload;
+$("workload-line").textContent = `Workload: fanout [${wl.fanout.join(" ")}], fill [${wl.fill.join(" ")}] (dense maze), seed ${wl.seed}, weights tile ${wl.weights.tile} : seen-scan ${wl.weights["seen-scan"]}. Objective: min-gain ${DATA.task.objective.min_gain}, ns-per-byte ${DATA.task.objective.ns_per_byte}.`;
+$("notes-line").textContent = "Modeling: " + DATA.notes;
+$("game-src").innerHTML = [["get-tile (point)",DATA.sources.db_get_tile],["display-seen (full scan)",DATA.sources.display_seen],["with-360-fov (point reads)",DATA.sources.fov]]
+  .map(([n,s])=>`<div class="card" style="margin:0"><h3 style="margin-top:0" class="mono accent">${n}</h3><pre style="margin:0">${s.replace(/</g,"&lt;")}</pre></div>`).join("");
+const s0 = DATA.descend.steps[0];
+$("descent-card").innerHTML = `<h3 style="margin-top:0">Step 1 · from <code>${s0.from}</code> (${fmt(s0.cost,2)} ns screening)</h3>
+<div id="step-bars"></div>
+<p><span class="pill worse">worse</span> the only neighbor — <code>set-format order 0 → :csf</code> — measures ${fmt(s0.candidates[0].cost,2)} ns.
+No order with a different permutation is proposed: no pattern binds y without x, and a full scan gains no prefix from any order.</p>
+<p style="margin-bottom:0"><span class="pill no-change">stop</span> ${DATA.descend.stopped} Final = start = <code>${DATA.descend.final}</code>.</p>`;
+logBars($("step-bars"), s0.candidates.map(c=>({label:"set-format order 0 → :csf", value:c.cost, color:"var(--bad)", tip:c.hash+" · worse"}))
+  .concat([{label:"keep [0 1] :hash", value:s0.cost, color:"var(--good)", tip:"baseline"}]));
+const patNames = DATA.patterns.map(p=>p.pattern);
+let active = new Set(patNames);
+function planCost(p){
+  if(active.size===patNames.length) return p.cost;
+  const sel = p.patterns.filter(x=>active.has(x.pattern));
+  return sel.reduce((a,x)=>a+x.ns*x.weight,0)/sel.reduce((a,x)=>a+x.weight,0);
+}
+function renderToggles(){
+  $("pattern-toggles").innerHTML =
+    `<button class="${active.size===patNames.length?'active':''}" onclick="setPats('all')">weighted cost</button>` +
+    patNames.map(n=>`<button class="${active.has(n)&&active.size<patNames.length?'active':''}" onclick="setPats('${n}')">${n}</button>`).join("");
+}
+function setPats(n){ active = n==="all" ? new Set(patNames) : new Set([n]); renderToggles(); renderCompare(); }
+window.setPats = setPats;
+function renderCompare(){
+  logBars($("compare"), P.map(p=>({label:`${p.label} · ${p.hash}`, value:planCost(p), color:PLANC[p.role],
+    tip:`${fmt(planCost(p),3)} ns · ${p.bytes.toLocaleString()} bytes`})));
+}
+renderToggles(); renderCompare();
+logBars($("per-pattern"), P.flatMap(p=>p.patterns.map(x=>({label:`${x.pattern} · ${p.hash.slice(0,4)} (${p.role})`, value:x.ns, color:PLANC[p.role], tip:`spread ±${x.spread} ns · ${x.reps} reps`}))));
+const maxB = Math.max(...P.map(p=>p.bytes));
+$("memory").innerHTML = P.map(p=>`<div class="bar-row"><div class="bar-label">${p.hash} · ${p.role}</div>
+  <div class="bar-track"><div class="bar-fill" style="width:${100*p.bytes/maxB}%;background:${PLANC[p.role]}"></div></div>
+  <div class="bar-val">${(p.bytes/1024).toFixed(1)} KiB</div></div>`).join("");
+const sens = DATA.evaluate.sensitivity;
+$("flips").innerHTML = sens.patterns.map(sp=>`<div class="card"><div class="v ${sp.effect==='better'?'good':'bad'}">×${sp.flip_factor}</div>
+  <div class="k note">weight of <code>${sp.pattern}</code> (now ${sp.weight}) flips the verdict<br>effect today: ${sp.effect} (${sp.delta_ns>0?'+':''}${fmt(sp.delta_ns,2)} ns)</div></div>`).join("");
+$("flip-text").innerHTML = `Shrink the <code>tile</code> weight to <b>${Math.round(900*0.168)}</b> (×0.168) — or grow the <code>seen-scan</code> weight to <b>~6</b> (×5.965) — and csf becomes the better plan.`;
+$("plan-src").textContent = DATA.sources.plan;
+$("emitted-src").textContent = DATA.sources.emitted;
+$("descend-json").textContent = JSON.stringify(DATA.descend, null, 1);
+$("journal").innerHTML = DATA.journal.map(r=>`<div class="jrec"><b>${r.op} · ${r.baseline} → ${r.candidate} · ${r.verdict} · ${fmt(r["baseline-cost"],2)} → ${fmt(r["candidate-cost"],2)} ns · ${r.rounds} rounds</b><br><span class="note">${r.at}</span></div>`).join("");
+</script>
+</body>
+</html>

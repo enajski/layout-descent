@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Layout Descent × sparse-layout — case study</title>
+<style>
+:root{
+  --bg:#0e1116; --panel:#161b23; --panel2:#1c2330; --line:#2a3342;
+  --text:#dce3ec; --dim:#8b96a8; --accent:#5cc8ff; --good:#3fb96f; --bad:#e05d5d; --mid:#9aa4b2;
+  --gold:#e8b44a; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1060px;margin:0 auto;padding:28px 20px 80px}
+h1{font-size:26px;margin:0 0 4px}
+h2{font-size:19px;margin:44px 0 12px;border-bottom:1px solid var(--line);padding-bottom:8px}
+h3{font-size:15px;margin:18px 0 8px}
+.sub{color:var(--dim);margin:0 0 18px}
+code,.mono{font-family:var(--mono);font-size:.92em}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:12px 0}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin:18px 0}
+.stat{flex:1 1 150px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.stat .v{font-size:22px;font-weight:650;font-family:var(--mono)}
+.stat .k{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+.good{color:var(--good)} .bad{color:var(--bad)} .mid{color:var(--mid)} .accent{color:var(--accent)} .gold{color:var(--gold)}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+td.num,th.num{text-align:right;font-family:var(--mono)}
+.chip{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:2px 12px;margin:2px 4px 2px 0;font-family:var(--mono);font-size:13px}
+.pill{display:inline-block;border-radius:4px;padding:1px 8px;font-size:12px;font-weight:600;font-family:var(--mono)}
+.pill.better{background:#12351f;color:var(--good)} .pill.worse{background:#3a1a1a;color:var(--bad)}
+.pill.no-change{background:#2a2f38;color:var(--mid)} .pill.accept{background:#12303a;color:var(--accent)}
+button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px 14px;cursor:pointer;font-size:14px}
+button:hover{border-color:var(--accent)}
+button.active{background:#12303a;border-color:var(--accent);color:var(--accent)}
+.stepper{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.stepbtn{flex:1 1 120px;text-align:left;padding:10px 12px}
+.stepbtn .t{font-weight:600;font-size:13px}
+.stepbtn .c{font-family:var(--mono);font-size:12px;color:var(--dim)}
+.bar-row{display:grid;grid-template-columns:230px 1fr 110px;gap:10px;align-items:center;margin:7px 0}
+.bar-label{font-family:var(--mono);font-size:12.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar-track{background:var(--panel2);border-radius:5px;height:22px;position:relative;overflow:hidden}
+.bar-fill{height:100%;border-radius:5px;min-width:3px;transition:width .35s ease}
+.bar-val{font-family:var(--mono);font-size:12.5px;text-align:right;color:var(--dim)}
+.bar-row.chosen .bar-label{color:var(--gold);font-weight:700}
+.axis{display:flex;justify-content:space-between;color:var(--dim);font-family:var(--mono);font-size:11px;margin:4px 0 0 240px;padding-right:120px}
+details{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:10px 0}
+summary{cursor:pointer;font-weight:600;color:var(--accent)}
+pre{background:#0a0d12;border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.5;color:#c7d2e0}
+.note{color:var(--dim);font-size:13.5px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:800px){.grid2{grid-template-columns:1fr}.bar-row{grid-template-columns:150px 1fr 90px}.axis{margin-left:160px;padding-right:100px}}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--dim);margin:8px 0}
+.dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.jrec{border-left:3px solid var(--line);padding:6px 12px;margin:8px 0;font-family:var(--mono);font-size:12.5px;background:var(--panel2);border-radius:0 6px 6px 0}
+.jrec.better{border-color:var(--good)} .jrec.worse{border-color:var(--bad)} .jrec.no-change{border-color:var(--mid)} .jrec.accept{border-color:var(--accent)}
+.kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 5px;color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Layout Descent × <span class="accent">sparse-layout</span></h1>
+<p class="sub">A measured layout search rediscovering CSR + CSC · case study · task <code id="task-hash"></code> · generated from the descent journal and evaluation traces</p>
+
+<div class="stats" id="stats"></div>
+
+<h2>1 · The task, grounded in the benchmark</h2>
+<div class="card">
+<p style="margin-top:0">The nested-map model of <code>sparse-layout</code>'s own benchmark baseline
+(<code>bench/sparse_layout/bench_data.clj</code>): <code>{entity {feature payload}}</code>, scalar keys,
+config <em>“scalar keys / small”</em> — 2048 entities × 256 features, 12 present features per entity.
+The hot paths read the first double of each payload block, so the leaf is <code>:double</code>.
+The benchmark runs each operation as one equal case → equal weights.</p>
+<div id="levels"></div>
+<table style="margin-top:10px"><thead><tr><th>Pattern</th><th>Bind</th><th>Fold</th><th>Bench call site</th><th>Generated call</th></tr></thead><tbody id="pattern-rows"></tbody></table>
+<p class="note" id="workload-line"></p>
+</div>
+<div class="grid2" id="bench-src"></div>
+
+<h2>2 · The descent, step by step</h2>
+<p class="note">Click a step (or use <span class="kbd">←</span> <span class="kbd">→</span>). Bars are weighted mean ns per call, log scale — screening measurements taken inside <code>descend</code>. The chosen move is re-measured alone and on a holdout seed before it counts.</p>
+<div class="stepper" id="stepper"></div>
+<div class="card" id="step-detail"></div>
+
+<h3>Accepted path — weighted mean ns per call (log scale)</h3>
+<div class="card" id="waterfall"></div>
+
+<h2>3 · Plan comparison — careful measurements</h2>
+<p class="note">Each plan re-measured against the final plan with <code>evaluate</code>: same seeded dataset, interleaved rounds, weighted median. Toggle patterns; hover bars for exact values.</p>
+<div style="margin:10px 0" id="pattern-toggles"></div>
+<div class="card" id="compare"></div>
+<div class="grid2">
+  <div class="card"><h3 style="margin-top:0">Per-pattern ns (final plan)</h3><div id="final-patterns"></div></div>
+  <div class="card"><h3 style="margin-top:0">Estimated bytes</h3><div id="memory"></div><p class="note">The hash point index costs 2.7× the memory of pure CSR+CSC — and buys nothing here.</p></div>
+</div>
+
+<h2>4 · The hand-written move the search cannot reach</h2>
+<div class="card" id="hand-card"></div>
+
+<h2>5 · What descent found is what sparse-layout ships</h2>
+<div class="card">
+<table><thead><tr><th>layout-descent decision</th><th>sparse-layout equivalent</th></tr></thead><tbody id="mapping"></tbody></table>
+<p style="margin-bottom:0">Starting from the benchmark's naive nested persistent map, two measured moves reach
+<code>orders [0 1] :csf + [1 0] :csf</code> — exactly <code>:indices #{:csr :csc}</code>, the index set
+<code>defsparse</code> compiles in the benchmark. The search also confirms the library's default:
+with 12 entries per row, binary search in a sorted CSR span beats a hash point index, so no third index is justified at this sparsity.</p>
+</div>
+
+<h2>6 · Artifacts & raw traces</h2>
+<details><summary>Accepted plan.edn</summary><pre id="plan-src"></pre></details>
+<details><summary>Emitted namespace (generated, gated: 720 checks, 0 mismatches, no warnings)</summary><pre id="emitted-src"></pre></details>
+<details><summary>Journal — every measurement and the accept</summary><div id="journal"></div></details>
+<details><summary>Full descent JSON</summary><pre id="descend-json"></pre></details>
+
+<p class="note" style="margin-top:30px">Case study files: <code>layout-descent/case-studies/sparse-layout/</code> ·
+plan hash <code>31d255ce3c2c</code> · task hash <code>7c4f57b77b62</code> ·
+measurements: 15 interleaved rounds, holdout on a second seed · costs are weighted medians, bytes are estimates from entry counts.</p>
+</div>
+
+<script>
+const DATA = {"task": {"name": "sparse-layout-case", "task": "7c4f57b77b62", "levels": [{"id": "entity", "type": "long"}, {"id": "feature", "type": "keyword"}], "leaf": "double", "objective": {"ns_per_byte": 0.0, "min_gain": 0.05}}, "patterns": [{"bound_levels": 2, "returns": "the leaf, or nil when the path is absent", "call": "(point ds entity feature)", "bind": ["key", "key"], "perm": [0, 1], "fold": null, "order": 0, "pattern": "point", "indexed_levels": 2, "weight": 1, "format": "csf"}, {"bound_levels": 1, "returns": "the sum of the selected leaves; the order of addition is not specified", "call": "(row-sum ds entity)", "bind": ["key", "scan"], "perm": [0, 1], "fold": "sum", "order": 0, "pattern": "row-sum", "indexed_levels": 1, "weight": 1, "format": "csf"}, {"bound_levels": 1, "returns": "the sum of the selected leaves; the order of addition is not specified", "call": "(col-sum ds feature)", "bind": ["scan", "key"], "perm": [1, 0], "fold": "sum", "order": 1, "pattern": "col-sum", "indexed_levels": 1, "weight": 1, "format": "csf"}], "workload": {"fanout": [2048, 256], "fill": [1.0, 0.046875], "seed": 7, "weights": {"col-sum": 1, "point": 1, "row-sum": 1}}, "plans": [{"hash": "e7b984ae6a4b", "label": "Start: row-major hash", "role": "baseline", "orders": [{"perm": [0, 1], "format": "hash"}], "serve": {"point": 0, "row-sum": 0, "col-sum": 0}, "cost": 16612.97, "time_ns": 16612.97, "noise": 151.059, "bytes": 1557144, "entries": 24587, "patterns": [{"pattern": "point", "ns": 25.275, "spread": 0.212, "weight": 1, "order": 0, "reps": 2909}, {"pattern": "row-sum", "ns": 55.166, "spread": 0.496, "weight": 1, "order": 0, "reps": 1170}, {"pattern": "col-sum", "ns": 49758.469, "spread": 452.469, "weight": 1, "order": 0, "reps": 1}]}, {"hash": "d400203ea289", "label": "Step 1: + column-major csf (CSC)", "role": "accepted step", "orders": [{"perm": [0, 1], "format": "hash"}, {"perm": [1, 0], "format": "csf"}], "serve": {"point": 0, "row-sum": 0, "col-sum": 1}, "cost": 52.91, "time_ns": 52.91, "noise": 0.58, "bytes": 2001696, "entries": 24587, "patterns": [{"pattern": "point", "ns": 25.083, "spread": 0.276, "weight": 1, "order": 0, "reps": 2461}, {"pattern": "row-sum", "ns": 55.136, "spread": 1.347, "weight": 1, "order": 0, "reps": 969}, {"pattern": "col-sum", "ns": 78.512, "spread": 0.116, "weight": 1, "order": 1, "reps": 786}]}, {"hash": "31d255ce3c2c", "label": "Step 2: row order to csf (CSR+CSC) \u2014 final", "role": "final", "orders": [{"perm": [0, 1], "format": "csf"}, {"perm": [1, 0], "format": "csf"}], "serve": {"point": 0, "row-sum": 0, "col-sum": 1}, "cost": 41.388, "time_ns": 41.388, "noise": 0.298, "bytes": 903440, "entries": 24587, "patterns": [{"pattern": "point", "ns": 22.702, "spread": 0.42, "weight": 1, "order": 0, "reps": 1811}, {"pattern": "row-sum", "ns": 24.317, "spread": 0.224, "weight": 1, "order": 0, "reps": 2822}, {"pattern": "col-sum", "ns": 77.146, "spread": 0.25, "weight": 1, "order": 1, "reps": 806}]}, {"hash": "020af40b25d5", "label": "Hand-written: + hash order for point", "role": "rejected", "orders": [{"perm": [0, 1], "format": "csf"}, {"perm": [1, 0], "format": "csf"}, {"perm": [0, 1], "format": "hash"}], "serve": {"point": 2, "row-sum": 0, "col-sum": 1}, "cost": 43.961, "time_ns": 43.961, "noise": 0.301, "bytes": 2460584, "entries": 24587, "patterns": [{"pattern": "point", "ns": 25.041, "spread": 0.279, "weight": 1, "order": 2, "reps": 2399}, {"pattern": "row-sum", "ns": 25.787, "spread": 0.174, "weight": 1, "order": 0, "reps": 2461}, {"pattern": "col-sum", "ns": 81.054, "spread": 0.449, "weight": 1, "order": 1, "reps": 738}]}], "descend": {"ok": true, "command": "descend", "start": "e7b984ae6a4b", "final": "31d255ce3c2c", "verdict": "better", "gain": 0.998, "steps": [{"from": "e7b984ae6a4b", "cost": 17702.26, "candidates": [{"hash": "d400203ea289", "move": {"op": "add-order", "perm": [1, 0], "format": "csf", "serves": ["col-sum"]}, "cost": 50.746, "verdict": "better"}, {"hash": "bc9946b5236c", "move": {"op": "add-order", "perm": [1, 0], "format": "hash", "serves": ["col-sum"]}, "cost": 118.664, "verdict": "better"}, {"hash": "c9d3ad1046e8", "move": {"op": "set-format", "order": 0, "format": "csf"}, "cost": 18331.399, "verdict": "no-change"}], "chosen": {"hash": "d400203ea289", "move": {"op": "add-order", "perm": [1, 0], "format": "csf", "serves": ["col-sum"]}, "why": "Order [1 0] fixes a longer prefix for :col-sum.", "gain": 0.997, "cost": 53.263}, "stopped": null}, {"from": "d400203ea289", "cost": 53.029, "candidates": [{"hash": "31d255ce3c2c", "move": {"op": "set-format", "order": 0, "format": "csf"}, "cost": 43.871, "verdict": "better"}, {"hash": "bc9946b5236c", "move": {"op": "set-format", "order": 1, "format": "hash"}, "cost": 129.091, "verdict": "worse"}, {"hash": "b6ebd95093ce", "move": {"op": "drop-order", "order": 0}, "cost": 3201.03, "verdict": "worse"}, {"hash": "e7b984ae6a4b", "move": {"op": "drop-order", "order": 1}, "cost": 17297.083, "verdict": "worse"}, {"hash": "48ccf9f96b83", "move": {"op": "serve", "pattern": "point", "order": 1}, "cost": 56.76, "verdict": "worse"}], "chosen": {"hash": "31d255ce3c2c", "move": {"op": "set-format", "order": 0, "format": "csf"}, "why": "Store order 0 [0 1] as :csf instead of :hash.", "gain": 0.2, "cost": 42.51}, "stopped": null}, {"from": "31d255ce3c2c", "cost": 41.421, "candidates": [{"hash": "d400203ea289", "move": {"op": "set-format", "order": 0, "format": "hash"}, "cost": 52.642, "verdict": "worse"}, {"hash": "9f1b64322848", "move": {"op": "set-format", "order": 1, "format": "hash"}, "cost": 122.11, "verdict": "worse"}, {"hash": "b6ebd95093ce", "move": {"op": "drop-order", "order": 0}, "cost": 3201.833, "verdict": "worse"}, {"hash": "c9d3ad1046e8", "move": {"op": "drop-order", "order": 1}, "cost": 18255.953, "verdict": "worse"}, {"hash": "4f5d010f65e1", "move": {"op": "serve", "pattern": "point", "order": 1}, "cost": 44.181, "verdict": "worse"}], "chosen": null, "stopped": "No neighbor is better."}], "stopped": "No neighbor is better.", "candidate": "/Users/wojtekfranke/workspace/layout-descent/case-studies/sparse-layout/final-candidate.edn", "journal": "/Users/wojtekfranke/workspace/layout-descent/case-studies/sparse-layout/plan.edn.journal", "next": "accept /Users/wojtekfranke/workspace/layout-descent/case-studies/sparse-layout/final-candidate.edn --into /Users/wojtekfranke/workspace/layout-descent/case-studies/sparse-layout/plan.edn"}, "journal": [{"baseline": "e7b984ae6a4b", "holdout": "better", "candidate": "d400203ea289", "task": "7c4f57b77b62", "candidate-cost": 53.262746749717444, "op": "evaluate", "at": "2026-11-20T18:01:29.116173Z", "gain": 0.9967630165981388, "verdict": "better", "baseline-cost": 16454.43925325499, "rounds": 15}, {"baseline": "d400203ea289", "holdout": "better", "candidate": "31d255ce3c2c", "task": "7c4f57b77b62", "candidate-cost": 42.509883363390564, "op": "evaluate", "at": "2026-11-20T18:01:36.008301Z", "gain": 0.19961556162255006, "verdict": "better", "baseline-cost": 53.11183142136942, "rounds": 15}, {"baseline": "e7b984ae6a4b", "holdout": "better", "candidate": "31d255ce3c2c", "task": "7c4f57b77b62", "candidate-cost": 42.809378635618806, "op": "evaluate", "at": "2026-11-20T18:01:42.902725Z", "gain": 0.9975309204850663, "verdict": "better", "baseline-cost": 17338.193596721332, "rounds": 15}, {"op": "accept", "from": "e7b984ae6a4b", "to": "31d255ce3c2c", "gain": 0.9975309204850663, "at": "2026-11-20T18:02:04.180081Z"}, {"baseline": "31d255ce3c2c", "holdout": null, "candidate": "020af40b25d5", "task": "7c4f57b77b62", "candidate-cost": 43.96077676997681, "op": "evaluate", "at": "2026-11-20T18:02:23.790449Z", "gain": -0.03248765781378681, "verdict": "no-change", "baseline-cost": 42.57753246470798, "rounds": 15}, {"baseline": "31d255ce3c2c", "holdout": null, "candidate": "e7b984ae6a4b", "task": "7c4f57b77b62", "candidate-cost": 16612.969826895103, "op": "evaluate", "at": "2026-11-20T18:03:08.932667Z", "gain": -398.4357530022018, "verdict": "worse", "baseline-cost": 41.59109369161435, "rounds": 15}, {"baseline": "31d255ce3c2c", "holdout": null, "candidate": "d400203ea289", "task": "7c4f57b77b62", "candidate-cost": 52.91005560419234, "op": "evaluate", "at": "2026-11-20T18:03:11.372319Z", "gain": -0.2783779419583541, "verdict": "worse", "baseline-cost": 41.388429718318775, "rounds": 15}], "hand_verdict": {"verdict": "no-change", "gain": -0.03248765781378681, "reason": "The difference is below :min-gain or within three times the noise.", "delta_ns": -1.383, "noise_ns": 2.031}, "sources": {"plan": "{:layout/version 1\n :name sparse-layout-case\n :levels [{:id :entity, :type :long}\n          {:id :feature, :type :keyword}]\n :leaf {:type :double}\n :patterns [{:id :point, :bind [:key :key], :doc \"point lookup: first value of one block\", :sites [\"bench_data.clj:166 nested-row-point-value\"]}\n            {:id :row-sum, :bind [:key :scan], :fold :sum, :doc \"row scan: sum of one entity's features\", :sites [\"bench_data.clj:181 nested-row-map-sum\"]}\n            {:id :col-sum, :bind [:scan :key], :fold :sum, :doc \"column scan: one feature summed across all entities\", :sites [\"bench_data.clj:209 nested-row-only-col-sum\"]}]\n :orders [{:perm [0 1], :format :csf}\n          {:perm [1 0], :format :csf}]\n :serve {:col-sum 1, :point 0, :row-sum 0}\n :workload {:fanout [2048 256], :fill [1.0 0.046875], :seed 7, :weights {:col-sum 1, :point 1, :row-sum 1}}\n :objective {:ns-per-byte 0.0, :min-gain 0.05}\n :emit {:ns sparse-layout-case.layout, :path \"src/sparse_layout_case/layout.clj\"}}\n", "emitted": ";; GENERATED by layout-descent from plan 31d255ce3c2c. Do not edit: change the plan and emit again.\n(ns sparse-layout-case.layout\n  \"Layout sparse-layout-case, compiled from plan 31d255ce3c2c.\"\n  (:require [layout-descent.rt :as rt]))\n\n(set! *warn-on-reflection* true)\n\n(def plan-hash \"31d255ce3c2c\")\n\n(def descriptor\n  {:types [:long :keyword], :leaf :double, :orders [{:perm [0 1], :format :csf} {:perm [1 0], :format :csf}]})\n\n(defn build\n  \"Compile a nested map into the dataset that the functions of this namespace read.\"\n  [data]\n  (rt/build-dataset descriptor data))\n\n(defn point\n  \"Pattern :point [:key :key], served by order 0 [0 1] :csf.\n  Returns the leaf, or nil when the path is absent.\"\n  {:arglists '([ds entity feature])}\n  [^layout_descent.rt.Dataset ds k0 k1]\n  (let [^layout_descent.rt.Csf c (aget ^objects (.-orders ds) 0)\n        ^java.util.HashMap dict0 (aget ^objects (.-dicts c) 0)\n        ^java.util.HashMap dict1 (aget ^objects (.-dicts c) 1)\n        ^ints ids1 (aget ^objects (.-ids c) 1)\n        ^ints ptrs0 (aget ^objects (.-ptrs c) 0)\n        ^doubles leaves (.-leaves c)]\n    (let [id (.get dict0 (long k0))]\n      (when-not (nil? id)\n        (let [p0 (int id)]\n          (let [a1 (aget ptrs0 p0)\n                b1 (aget ptrs0 (inc p0))]\n            (let [id (.get dict1 k1)]\n              (when-not (nil? id)\n                (let [p1 (java.util.Arrays/binarySearch ids1 (int a1) (int b1) (int id))]\n                  (when-not (neg? p1)\n                    (aget leaves p1)))))))))))\n\n(defn row-sum\n  \"Pattern :row-sum [:key :scan], served by order 0 [0 1] :csf.\n  Returns the sum of the selected leaves; the order of addition is not specified.\"\n  {:arglists '([ds entity])}\n  [^layout_descent.rt.Dataset ds k0]\n  (let [^layout_descent.rt.Csf c (aget ^objects (.-orders ds) 0)\n        ^java.util.HashMap dict0 (aget ^objects (.-dicts c) 0)\n        ^ints ptrs0 (aget ^objects (.-ptrs c) 0)\n        ^doubles leaves (.-leaves c)\n        cell (double-array 1)]\n    (let [id (.get dict0 (long k0))]\n      (when-not (nil? id)\n        (let [p0 (int id)]\n          (let [a1 (aget ptrs0 p0)\n                b1 (aget ptrs0 (inc p0))]\n            (aset cell 0 (+ (aget cell 0) (rt/sum-doubles leaves a1 b1)))))))\n    (aget cell 0)))\n\n(defn col-sum\n  \"Pattern :col-sum [:scan :key], served by order 1 [1 0] :csf.\n  Returns the sum of the selected leaves; the order of addition is not specified.\"\n  {:arglists '([ds feature])}\n  [^layout_descent.rt.Dataset ds k1]\n  (let [^layout_descent.rt.Csf c (aget ^objects (.-orders ds) 1)\n        ^java.util.HashMap dict0 (aget ^objects (.-dicts c) 0)\n        ^ints ptrs0 (aget ^objects (.-ptrs c) 0)\n        ^doubles leaves (.-leaves c)\n        cell (double-array 1)]\n    (let [id (.get dict0 k1)]\n      (when-not (nil? id)\n        (let [p0 (int id)]\n          (let [a1 (aget ptrs0 p0)\n                b1 (aget ptrs0 (inc p0))]\n            (aset cell 0 (+ (aget cell 0) (rt/sum-doubles leaves a1 b1)))))))\n    (aget cell 0)))\n", "bench_point": "(defn nested-row-point-value ^double [nested-rows row col]\n  (first-payload-value (get-in nested-rows [row col])))", "bench_row": "(defn nested-row-map-sum ^double [nested-rows row]\n  (reduce-kv (fn [sum _ payload]\n               (+ (double sum) (first-payload-value payload)))\n             0.0\n             (get nested-rows row)))", "bench_col": "(defn nested-row-only-col-sum ^double [nested-rows col]\n  (reduce-kv (fn [sum _ row-map]\n               (if-let [payload (get row-map col)]\n                 (+ (double sum) (first-payload-value payload))\n                 sum))\n             0.0\n             nested-rows))"}, "mapping": [{"layout_descent": "single order [0 1] :hash", "sparse_layout": "nested persistent row map (the bench baseline)"}, {"layout_descent": "order [0 1] :csf", "sparse_layout": "CSR \u2014 compressed sparse row"}, {"layout_descent": "order [1 0] :csf", "sparse_layout": "CSC \u2014 compressed sparse column"}, {"layout_descent": "final: both orders :csf", "sparse_layout": ":indices #{:csr :csc}"}]};
+const $ = id => document.getElementById(id);
+const fmt = (v,d=1) => v>=1000 ? Math.round(v).toLocaleString("en-US") : v.toFixed(d);
+const VERD = {better:"var(--good)", worse:"var(--bad)", "no-change":"var(--mid)"};
+const PLANC = {baseline:"var(--bad)", "accepted step":"var(--gold)", final:"var(--good)", rejected:"var(--mid)"};
+
+function logBars(el, rows, opts={}){
+  // rows: {label, value, color, chosen, tip}
+  const vals = rows.map(r=>r.value).filter(v=>v>0);
+  const lo = Math.log10(Math.min(...vals)), hi = Math.log10(Math.max(...vals));
+  const span = Math.max(hi-lo, 1e-9);
+  el.innerHTML = rows.map(r=>{
+    const w = r.value>0 ? Math.max(2, 100*(Math.log10(r.value)-lo)/span) : 2;
+    return `<div class="bar-row${r.chosen?' chosen':''}" title="${r.tip||''}">
+      <div class="bar-label">${r.label}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${r.color}"></div></div>
+      <div class="bar-val">${fmt(r.value)} ns</div></div>`;
+  }).join("") + `<div class="axis"><span>10^${lo.toFixed(1)}</span><span>log scale</span><span>10^${hi.toFixed(1)}</span></div>`;
+}
+
+// header stats
+const P = DATA.plans, start=P[0], fin=P[2];
+$("task-hash").textContent = DATA.task.task;
+$("stats").innerHTML = [
+  ["start cost", fmt(start.cost)+" ns", ""],
+  ["final cost", fmt(fin.cost)+" ns", "good"],
+  ["reduction", "−"+(100*(1-fin.cost/start.cost)).toFixed(2)+" %", "good"],
+  ["moves accepted", "2", "accent"],
+  ["gate checks", "720 ✓", "accent"],
+].map(([k,v,c])=>`<div class="stat"><div class="v ${c}">${v}</div><div class="k">${k}</div></div>`).join("");
+
+// task
+$("levels").innerHTML = DATA.task.levels.map((l,i)=>`<span class="chip">level ${i}: ${l.id} : ${l.type}</span>`).join("") +
+  `<span class="chip">leaf : ${DATA.task.leaf}</span>`;
+$("pattern-rows").innerHTML = DATA.patterns.map(p=>{
+  const site = (DATA.sources && p.pattern) ? "" : "";
+  return `<tr><td class="mono accent">${p.pattern}</td><td class="mono">[${p.bind.join(" ")}]</td>
+  <td class="mono">${p.fold||"—"}</td><td class="note">${site}</td><td class="mono">${p.call}</td></tr>`;
+}).join("");
+const sites = {point:"bench_data.clj:166 · nested-row-point-value", "row-sum":"bench_data.clj:181 · nested-row-map-sum", "col-sum":"bench_data.clj:209 · nested-row-only-col-sum"};
+document.querySelectorAll("#pattern-rows tr").forEach((tr,i)=>{ tr.children[3].textContent = sites[DATA.patterns[i].pattern]; });
+const wl = DATA.workload;
+$("workload-line").textContent = `Workload: fanout [${wl.fanout.join(" ")}], fill [${wl.fill.join(" ")}] (12/256 present per row), seed ${wl.seed}, weights equal (1:1:1). Objective: min-gain ${DATA.task.objective.min_gain}, ns-per-byte ${DATA.task.objective.ns_per_byte}.`;
+$("bench-src").innerHTML = [["point", DATA.sources.bench_point],["row-sum", DATA.sources.bench_row],["col-sum", DATA.sources.bench_col]]
+  .map(([n,s])=>`<div class="card" style="margin:0"><h3 style="margin-top:0" class="mono accent">${n}</h3><pre style="margin:0">${s.replace(/</g,"&lt;")}</pre></div>`).join("");
+
+// descent stepper
+const steps = DATA.descend.steps;
+const stepMeta = [
+  {t:"Start", c:fmt(steps[0].cost)+" ns", d:"Row-major hash — the bench baseline"},
+  ...steps.map((s,i)=> s.chosen
+    ? {t:"Move "+(i+1), c:fmt(s.chosen.cost)+" ns", d:moveText(s.chosen.move)}
+    : {t:"Fixed point", c:fmt(s.cost)+" ns", d:"No neighbor is better"})
+];
+function moveText(m){
+  if(m.op==="add-order") return `add order [${m.perm.join(" ")}] :${m.format} → serves ${m.serves.join(", ")}`;
+  if(m.op==="set-format") return `order ${m.order} → :${m.format}`;
+  if(m.op==="drop-order") return `drop order ${m.order}`;
+  if(m.op==="serve") return `serve ${m.pattern} from order ${m.order}`;
+  return m.op;
+}
+let cur = 0;
+function renderStepper(){
+  $("stepper").innerHTML = stepMeta.map((m,i)=>
+    `<button class="stepbtn${i===cur?' active':''}" onclick="showStep(${i})"><div class="t">${m.t}</div><div class="c">${m.c}</div><div class="c">${m.d}</div></button>`).join("");
+}
+function showStep(i){
+  cur = i; renderStepper();
+  const el = $("step-detail");
+  if(i===0){
+    el.innerHTML = `<h3 style="margin-top:0">Start · <code>${DATA.descend.start}</code></h3>
+    <p>One order <code>[0 1] :hash</code> — the nested persistent row map of the benchmark.
+    <code>check</code> already warns: <em>“Pattern :col-sum fixes 1 levels, but order 0 reaches only 0 of them before it must scan.”</em>
+    A column sum must visit every row: <b class="bad">${fmt(P[0].patterns.find(p=>p.pattern==="col-sum").ns,0)} ns</b> of the
+    ${fmt(start.cost)} ns total. The gate passes (720 checks) before any timing.</p>`;
+    return;
+  }
+  const s = steps[i-1];
+  const rows = s.candidates.map(c=>({
+    label: moveText(c.move), value: c.cost, color: VERD[c.verdict],
+    chosen: s.chosen && c.hash===s.chosen.hash,
+    tip: `${c.hash} · ${c.verdict} · ${fmt(c.cost,3)} ns`
+  }));
+  let html = `<h3 style="margin-top:0">${stepMeta[i].t} · from <code>${s.from}</code> (${fmt(s.cost)} ns)</h3>`;
+  html += `<div class="legend"><span><span class="dot" style="background:var(--good)"></span>better</span><span><span class="dot" style="background:var(--bad)"></span>worse</span><span><span class="dot" style="background:var(--mid)"></span>no-change</span><span><span class="dot" style="background:var(--gold)"></span>chosen</span></div>`;
+  html += `<div id="step-bars"></div>`;
+  if(s.chosen){
+    html += `<p style="margin-bottom:0"><span class="pill better">chosen</span> <b class="gold mono">${moveText(s.chosen.move)}</b><br>
+    <span class="note">${s.chosen.why} Re-measured alone: <b>${fmt(s.chosen.cost,2)} ns</b> (gain ${(100*s.chosen.gain).toFixed(1)} %), holdout seed agrees: <b class="good">better</b>.</span></p>`;
+  } else {
+    html += `<p style="margin-bottom:0"><span class="pill no-change">stop</span> ${s.stopped} The plan is a local optimum of single-decision moves.</p>`;
+  }
+  el.innerHTML = html;
+  logBars($("step-bars"), rows);
+}
+window.showStep = showStep;
+document.addEventListener("keydown", e=>{
+  if(e.key==="ArrowRight" && cur<stepMeta.length-1) showStep(cur+1);
+  if(e.key==="ArrowLeft" && cur>0) showStep(cur-1);
+});
+renderStepper(); showStep(0);
+
+// waterfall of accepted path
+logBars($("waterfall"), [
+  {label:"start · [0 1] hash", value:start.cost, color:PLANC.baseline, tip:start.hash},
+  {label:"move 1 · + [1 0] csf (CSC)", value:P[1].cost, color:PLANC["accepted step"], tip:P[1].hash},
+  {label:"move 2 · [0 1] → csf (CSR+CSC)", value:fin.cost, color:PLANC.final, tip:fin.hash},
+]);
+
+// comparison with pattern toggles
+const patNames = DATA.patterns.map(p=>p.pattern);
+let active = new Set(patNames);
+function renderToggles(){
+  $("pattern-toggles").innerHTML =
+    `<button class="${active.size===patNames.length?'active':''}" onclick="setPats('all')">all (weighted)</button>` +
+    patNames.map(n=>`<button class="${active.has(n)&&active.size<patNames.length?'active':''}" onclick="setPats('${n}')">${n}</button>`).join("");
+}
+function setPats(n){
+  active = n==="all" ? new Set(patNames) : new Set([n]);
+  renderToggles(); renderCompare();
+}
+window.setPats = setPats;
+function planCost(p){
+  if(active.size===patNames.length) return p.cost;
+  const sel = p.patterns.filter(x=>active.has(x.pattern));
+  const wsum = sel.reduce((a,x)=>a+x.weight,0);
+  return sel.reduce((a,x)=>a+x.ns*x.weight,0)/wsum;
+}
+function renderCompare(){
+  logBars($("compare"), P.map(p=>({
+    label:`${p.label} · ${p.hash}`, value:planCost(p), color:PLANC[p.role],
+    tip:`${p.role} · ${fmt(planCost(p),3)} ns · ${p.bytes.toLocaleString()} bytes`
+  })));
+}
+renderToggles(); renderCompare();
+
+// final per-pattern + memory
+logBars($("final-patterns"), fin.patterns.map(p=>({label:p.pattern+" (order "+p.order+")", value:p.ns, color:"var(--accent)", tip:`spread ±${p.spread} ns · ${p.reps} reps`})));
+const maxB = Math.max(...P.map(p=>p.bytes));
+$("memory").innerHTML = P.map(p=>`<div class="bar-row" title="${p.hash}">
+  <div class="bar-label">${p.hash} · ${p.role}</div>
+  <div class="bar-track"><div class="bar-fill" style="width:${100*p.bytes/maxB}%;background:${PLANC[p.role]}"></div></div>
+  <div class="bar-val">${(p.bytes/1e6).toFixed(2)} MB</div></div>`).join("");
+
+// hand-written card
+const hv = DATA.hand_verdict, hp = P[3];
+$("hand-card").innerHTML = `
+<p style="margin-top:0">The README's risk example ends with a hand-written plan that needs <b>two decisions at once</b> —
+a third order plus a serve move — which no single neighbor move reaches. Tried here: add <code>[0 1] :hash</code> and serve <code>:point</code> from it.</p>
+<table><thead><tr><th></th><th class="num">final (CSR+CSC)</th><th class="num">+ hash point index</th></tr></thead><tbody>
+<tr><td>point</td><td class="num">${fin.patterns[0].ns.toFixed(2)} ns</td><td class="num">${hp.patterns[0].ns.toFixed(2)} ns</td></tr>
+<tr><td>weighted cost</td><td class="num">${fmt(fin.cost,2)} ns</td><td class="num">${fmt(hp.cost,2)} ns</td></tr>
+<tr><td>estimated bytes</td><td class="num">${fin.bytes.toLocaleString()}</td><td class="num bad">${hp.bytes.toLocaleString()} (2.7×)</td></tr>
+</tbody></table>
+<p style="margin-bottom:0"><span class="pill no-change">${hv.verdict}</span> Δ ${hv.delta_ns} ns, inside 3× the noise (${hv.noise_ns} ns).
+With only 12 entries per row, binary search in the sorted CSR span is already faster than the hash lookup.
+<b>Keep the plan.</b> Unlike the 3-level risk example, the extra hash index is not justified at this sparsity.</p>`;
+
+// mapping
+$("mapping").innerHTML = DATA.mapping.map(m=>`<tr><td class="mono">${m.layout_descent}</td><td>${m.sparse_layout}</td></tr>`).join("");
+
+// artifacts
+$("plan-src").textContent = DATA.sources.plan;
+$("emitted-src").textContent = DATA.sources.emitted;
+$("descend-json").textContent = JSON.stringify(DATA.descend, null, 1);
+$("journal").innerHTML = DATA.journal.map(r=>{
+  const cls = r.op==="accept" ? "accept" : r.verdict;
+  const head = r.op==="accept"
+    ? `accept · ${r.from} → ${r.to} · gain ${(100*r.gain).toFixed(2)} %`
+    : `${r.op} · ${r.baseline} → ${r.candidate} · ${r.verdict} · ${fmt(r["baseline-cost"])} → ${fmt(r["candidate-cost"])} ns · holdout ${r.holdout??"—"} · ${r.rounds} rounds`;
+  return `<div class="jrec ${cls}"><b>${head}</b><br><span class="note">${r.at}</span></div>`;
+}).join("");
+</script>
+</body>
+</html>

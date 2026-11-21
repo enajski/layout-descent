@@ -1,0 +1,28 @@
+{:layout/version 1
+ :name sparse-layout-case
+ ;; Task grounded in sparse-layout bench/sparse_layout/bench_data.clj:
+ ;; the nested-row-index baseline {entity {feature payload}}, scalar keys,
+ ;; "scalar keys / small" config (2048 rows, 256 cols, 12 nnz per row).
+ ;; The hot paths read the first double of each payload block.
+ :levels [{:id :entity :type :long}
+          {:id :feature :type :keyword}]
+ :leaf {:type :double}
+ :patterns [{:id :point :bind [:key :key]
+             :doc "point lookup: first value of one block"
+             :sites ["bench_data.clj:166 nested-row-point-value"]}
+            {:id :row-sum :bind [:key :scan] :fold :sum
+             :doc "row scan: sum of one entity's features"
+             :sites ["bench_data.clj:181 nested-row-map-sum"]}
+            {:id :col-sum :bind [:scan :key] :fold :sum
+             :doc "column scan: one feature summed across all entities"
+             :sites ["bench_data.clj:209 nested-row-only-col-sum"]}]
+ ;; Start where the bench baseline starts: one row-major hash index.
+ :orders [{:perm [0 1] :format :hash}]
+ ;; bench.clj runs each operation as one equal case.
+ :workload {:fanout [2048 256]
+            :fill [1.0 0.046875]
+            :seed 7
+            :weights {:point 1 :row-sum 1 :col-sum 1}}
+ :objective {:min-gain 0.05 :ns-per-byte 0.0}
+ :emit {:ns sparse-layout-case.layout
+        :path "src/sparse_layout_case/layout.clj"}}

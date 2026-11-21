@@ -25,6 +25,8 @@
     :doc "Where a code base reads and scans nested maps, grouped by path shape. Shapes with fewer than --min-depth (2) computed levels and write sites are counted in `hidden`. --limit 0 gives counts only."}
    {:name "flow" :usage "flow <src-dir> --operation <namespace/function> [--lang clj|cljs]" :writes "nothing"
     :doc "Follow named map fields through one Clojure operation and its resolved callees. Steps, uses and unresolved boundaries are static evidence, not timings."}
+   {:name "discover" :usage "discover <src-dir> [--lang clj|cljs]" :writes "nothing"
+    :doc "Find filtered entry traversals and possible membership-index maintenance sites; hypotheses only."}
    {:name "schema" :usage "schema <src-dir> [--lang clj|cljs] [--limit N] [--entity <id>|loose] [--sites N] [--diagram <file.md|file.mmd>]"
     :writes "the file of --diagram"
     :doc "The data model of a code base: entities (records that share keys), the fields that one entity carries into another, and where the traces stopped. --entity adds the records of one entity with their paths and sites. --diagram writes a Mermaid flowchart. Static evidence, not timings."}
@@ -55,7 +57,7 @@
     :doc "Gate and return source, or write a preview to --out. Only accept writes the configured emitted file."}])
 
 (def ^:private flags-of
-  {"help" #{} "facts" #{:limit :min-depth :writes} "flow" #{:operation :lang} "schema" #{:lang :limit :entity :sites :diagram} "check" #{} "status" #{} "report" #{} "journal" #{:last}
+  {"help" #{} "facts" #{:limit :min-depth :writes} "flow" #{:operation :lang} "discover" #{:lang} "schema" #{:lang :limit :entity :sites :diagram} "check" #{} "status" #{} "report" #{} "journal" #{:last}
    "measure" #{:rounds :warm-ms} "verify" #{:source} "neighbors" #{:out-dir}
    "evaluate" #{:against :rounds :warm-ms} "descend" #{:max-steps :out :rounds :warm-ms}
    "accept" #{:into :force} "emit" #{:out}})
@@ -366,6 +368,16 @@
     (let [files ((requiring-resolve 'layout-descent.flow/source-files) dir)]
       (separate! (:save flags) files)
       ((requiring-resolve 'layout-descent.flow/analyze) dir files op lang))))
+
+(defmethod command "discover" [_ {:keys [positional flags]}]
+  (let [[dir] positional
+        lang (some-> (:lang flags) keyword)]
+    (when-not (and (= 1 (count positional)) (.isDirectory (io/file ^String dir))
+                   (or (nil? lang) (#{:clj :cljs} lang)))
+      (fail :usage "Usage: discover <src-dir> [--lang clj|cljs]."))
+    (let [files ((requiring-resolve 'layout-descent.flow/source-files) dir)]
+      (separate! (:save flags) files)
+      ((requiring-resolve 'layout-descent.discover/analyze) dir files lang))))
 
 (defmethod command "schema" [_ {:keys [positional flags]}]
   (let [[dir] positional

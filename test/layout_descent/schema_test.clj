@@ -56,9 +56,10 @@
   (let [m (model "test/fixtures/forms" {})]
     (is (= [["*"]] (map :path (:levels (entity m "orders")))) "a scanned collection is a level")
     (is (= {":mode" [1 1 0 0] ":retries" [0 1 0 0]} (counts (entity m "desk.forms/defaults"))))
-    (is (= #{:caught :opaque-call :unsupported-macro} (set (map :reason (:boundaries m)))))
+    (is (= #{:caught :opaque-call :unsupported-macro :unmodeled-dynamic-binding}
+           (set (map :reason (:boundaries m)))))
     (is (not (contains? m :records))))
-  (is (= 5 (count (:records (model "test/fixtures/forms" {:entity "loose"})))))
+  (is (= 8 (count (:records (model "test/fixtures/forms" {:entity "loose"})))))
   (is (= :schema-entity (try (model "test/fixtures/forms" {:entity "e99"})
                              (catch clojure.lang.ExceptionInfo e (:code (ex-data e)))))))
 

@@ -1,0 +1,15 @@
+{:layout/version 1
+ :name sparse-layout-case
+ :levels [{:id :entity, :type :long}
+          {:id :feature, :type :keyword}]
+ :leaf {:type :double}
+ :patterns [{:id :point, :bind [:key :key], :doc "point lookup: first value of one block", :sites ["bench_data.clj:166 nested-row-point-value"]}
+            {:id :row-sum, :bind [:key :scan], :fold :sum, :doc "row scan: sum of one entity's features", :sites ["bench_data.clj:181 nested-row-map-sum"]}
+            {:id :col-sum, :bind [:scan :key], :fold :sum, :doc "column scan: one feature summed across all entities", :sites ["bench_data.clj:209 nested-row-only-col-sum"]}]
+ :orders [{:perm [0 1], :format :csf}
+          {:perm [1 0], :format :csf}
+          {:perm [0 1], :format :hash}]
+ :serve {:col-sum 1, :point 2, :row-sum 0}
+ :workload {:fanout [2048 256], :fill [1.0 0.046875], :seed 7, :weights {:col-sum 1, :point 1, :row-sum 1}}
+ :objective {:ns-per-byte 0.0, :min-gain 0.05}
+ :emit {:ns sparse-layout-case.layout, :path "src/sparse_layout_case/layout.clj"}}

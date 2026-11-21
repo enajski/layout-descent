@@ -210,6 +210,8 @@
         sig (some #(when (and (not-any? #{'&} (first %)) (= (count args) (count (first %)))) %)
                   (signatures form (not closure)))]
     (cond
+      (and (:local ctx) (seq (:dynamic ctx)) (not closure) sig)
+      (boundary! ctx site :unmodeled-dynamic-binding op args)
       (and (:local ctx) (seq (:stack ctx)) (not closure) sig)
       (assoc (step! ctx site :call op args {::args (mapv #(hash-map :id (:id %) :shape (literal-shape %)) args)}) :unknown true)
       ((:stack ctx) id) (boundary! ctx site :recursive-call op args)
@@ -217,7 +219,10 @@
       (nil? sig) (boundary! ctx site :unsupported-arity op args)
       :else
       (let [passed (mapv #(pass! ctx site :pass op %) args)
-            inner (assoc ctx :file file :op op :at form :env (or closure {}) :stack (conj (:stack ctx) id))
+            inner (-> ctx
+                      (assoc :file file :op op :at form :env (or closure {}) :stack (conj (:stack ctx) id))
+                      (update :unmodeled-dynamic (fnil into #{}) (keys (:dynamic ctx)))
+                      (dissoc :dynamic))
             bound (reduce (fn [c [param v]] (when c (bind-value c param v))) inner (map vector (first sig) passed))]
         (cond (nil? bound) (boundary! ctx site :unsupported-binding op passed)
               (and (map? (second sig)) (next (next sig)) (some (second sig) [:pre :post]))
@@ -376,6 +381,19 @@
 (defn- resolved [ctx sym]
   (get (:calls ctx) (into [(:file ctx)] (pos sym))))
 
+(defn- binding-body [ctx form via]
+  (let [[bindings & forms] (rest form)]
+    (if (and (vector? bindings) (even? (count bindings)))
+      (let [pairs (partition 2 bindings)
+            targets (mapv (fn [[target]]
+                            (when (symbol? target) (first (resolved ctx target)))) pairs)
+            ;; All initializers see the outer bindings, even those after a rebinding.
+            values (mapv (fn [[_ init]] (trace-expr ctx init)) pairs)]
+        (if (every? #(and % (namespace %) (not= "<unknown-namespace>" (namespace %))) targets)
+          (body (update ctx :dynamic (fnil into {}) (map vector targets values)) forms)
+          (boundary! ctx form :unsupported-binding via values)))
+      (boundary! ctx form :unsupported-binding via []))))
+
 (defn- short-circuit [ctx site op [expr & more :as args]]
   (if (empty? args) {:literal (when (= op 'and) true)}
       (let [v (trace-expr ctx expr)]
@@ -394,6 +412,8 @@
         via (or q (when (symbol? f) f) "call")]
     (cond
       (contains? (:env ctx) f) (apply-value ctx form f (get (:env ctx) f) (vs))
+      (contains? (:dynamic ctx) q) (apply-value ctx form via (get (:dynamic ctx) q) (vs))
+      (contains? (:unmodeled-dynamic ctx) q) (boundary! ctx form :unmodeled-dynamic-binding via (vs))
       (keyword? f) (let [[m default] (vs)] (lookup ctx form "lookup" m [{:literal f}] default))
       (= 'quote f) (if (coll? (second form)) (boundary! ctx form :quoted-data f []) {:literal (second form)})
       (= 'do f) (body ctx args)
@@ -422,6 +442,7 @@
                        (reduce #(trace-expr (assoc-in ctx [:env sym] %1) %2) (ev init) exprs))
       (or (= 'fn core) (= 'fn* f)) {:fn {:op (:op ctx) :file (:file ctx) :form form :closure (:env ctx)}}
       (= 'let core) (let-body ctx form)
+      (= 'binding core) (binding-body ctx form via)
       (#{'-> '->> 'some-> 'some->>} core) (thread-body ctx form (boolean (#{'->> 'some->>} core)))
       (builtins core) (apply-builtin ctx form q (vs))
       (and (#{'map 'mapv 'keep} core) (= 2 (count args))) (map-call ctx form via (vs))
@@ -478,7 +499,8 @@
   [ctx q]
   (or (get @(:constants ctx) q)
       (let [{:keys [op file form]} (get (:vars ctx) q)
-            v (trace-expr (assoc ctx :file file :op op :at form :env {}) form)]
+            v (trace-expr (-> ctx (assoc :file file :op op :at form :env {})
+                              (dissoc :dynamic :unmodeled-dynamic)) form)]
         (vswap! (:constants ctx) assoc q v)
         v)))
 
@@ -488,6 +510,8 @@
       (symbol? form)
       (let [q (first (resolved ctx form))]
         (cond (contains? (:env ctx) form) (get (:env ctx) form)
+              (contains? (:dynamic ctx) q) (get (:dynamic ctx) q)
+              (contains? (:unmodeled-dynamic ctx) q) (boundary! ctx form :unmodeled-dynamic-binding q [])
               (unique-target ctx q) {:fn (unique-target ctx q)}
               (builtins (core-name q)) {:builtin q}
               (get (:vars ctx) q) (constant ctx q)

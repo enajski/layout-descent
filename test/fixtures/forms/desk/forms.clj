@@ -39,3 +39,17 @@
 
 (defn qualified [{:slot/keys [id] :keys [slot/coord] :as slot}]
   {:id id :coord coord :kind (:slot/kind slot)})
+
+(def ^:dynamic *options* {:root true})
+(def ^:dynamic *mirror* nil)
+
+(defn read-bound-option [] (:outer *options*))
+
+(defn scoped-binding []
+  (let [result (binding [*options* {:outer true}]
+                 {:nested (binding [*options* {:inner true} *mirror* *options*]
+                            [(:inner *options*) (:outer *mirror*)])
+                  :restored (:outer desk.forms/*options*)
+                  :helper (read-bound-option)
+                  :shadowed (let [*options* {:local true}] (:local *options*))})]
+    [result (:root *options*)]))

@@ -1,0 +1,33 @@
+{:layout/version 1
+ :name rotten-world
+ ;; Task grounded in rotten (github.com/enajski/rotten), a rot.js roguelike:
+ ;; db.cljs world = {[x y] tile}, a dense 30x30 maze grid (generate-maze,
+ ;; core.cljs:217). The vector coordinate key is modeled as two :long levels.
+ ;; Leaf is the tile map {:tile/kind ... :tile/walkable? ...} -> :object.
+ ;; Writes (move-entity, mark-tile-as-seen, ...) stay on the persistent map;
+ ;; the dataset is a read-only render/query snapshot, rebuilt after writes.
+ :levels [{:id :x :type :long}
+          {:id :y :type :long}]
+ :leaf {:type :object}
+ :patterns [{:id :tile :bind [:key :key]
+             :doc "point tile read: get-tile, is-walkable?, light-passes?, FOV draw"
+             :sites ["db.cljs:56 get-tile" "core.cljs:44 is-walkable?"
+                     "core.cljs:200 light-passes?" "core.cljs:285 with-360-fov"]}
+            {:id :seen-scan :bind [:scan :scan]
+             :doc "full world reduction: display-seen each frame; also the filter of get-random-empty-location"
+             :sites ["core.cljs:296 display-seen" "core.cljs:49 get-random-empty-location"]}]
+ ;; Baseline: the persistent nested map the game actually uses.
+ :orders [{:perm [0 1] :format :hash}]
+ ;; Per frame: FOV radius 10 ~ 314 cells x ~3 tile reads ~ 900 point reads,
+ ;; plus one full-world scan (display-seen). A* and random-location add
+ ;; occasional points/scans between frames; the frame mix dominates.
+ :workload {:fanout [30 30]
+            :fill [1.0 1.0]
+            :seed 7
+            :weights {:tile 900 :seen-scan 1}}
+ :objective {:min-gain 0.05 :ns-per-byte 0.0}
+ :emit {:ns rotten-world.layout
+        :path "src/rotten_world/layout.clj"}
+ :notes "rotten case study: dense 30x30 grid, point-dominated render loop.
+         Vector keys [x y] modeled as two long levels; tile maps as object leaves.
+         Weights approximate one rendered frame (900 FOV/path point reads : 1 full scan)."}

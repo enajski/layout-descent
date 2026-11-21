@@ -186,3 +186,15 @@
            (set (map :path (filter #(= :read (:kind %)) (:steps r))))))
     (is (= [":id"] (map :field (uses r ":slot/id" :carry))))
     (is (= [":coord"] (map :field (uses r ":slot/coord" :carry))))))
+
+(deftest binding-values-are-local-to-the-scoped-body
+  (let [r (form "scoped-binding")
+        reads (filter #(= :read (:kind %)) (:steps r))
+        resolved (set (map (juxt :field :resolution :in) reads))]
+    (is (= [:unmodeled-dynamic-binding] (reasons r)))
+    (is (= #{[":inner" :known-slot "desk.forms/scoped-binding"]
+             [":outer" :known-slot "desk.forms/scoped-binding"]
+             [":outer" :open "desk.forms/read-bound-option"]
+             [":local" :known-slot "desk.forms/scoped-binding"]
+             [":root" :known-slot "desk.forms/scoped-binding"]}
+           resolved))))

@@ -111,7 +111,7 @@ class ExtensionTest(unittest.TestCase):
     def test_every_tool_has_a_tag_an_activity_and_a_docstring(self):
         tools = [n for n in dir(self.descent) if not n.startswith("_")]
         self.assertEqual(
-            ["accept", "check", "descend", "emit", "evaluate", "facts", "flow", "journal", "measure", "neighbors",
+            ["accept", "check", "descend", "discover", "emit", "evaluate", "facts", "flow", "journal", "measure", "neighbors",
              "report", "review_patch", "schema", "status", "verify"],
             tools,
         )
@@ -222,11 +222,14 @@ class ExtensionTest(unittest.TestCase):
         render = self.descent.status.vis_meta["activity"].render
         self.assertEqual("Plan risk e471a80f71f4",
                          render(phase="success", args=(), kwargs={}, result=status, error=None).args[0])
+        discovery = self.descent.discover("case-studies/rotten/flow-src")
+        self.assertTrue(discovery["ok"])
+        self.assertEqual([":tile/seen?"], [scan["field"] for scan in discovery["opportunities"]])
         model = self.descent.schema("test/fixtures/forms")
         self.assertEqual(["order (:id)", "ticket"], [e["name"] for e in model["entities"][:2]])
         shown = self.descent.schema.vis_meta["activity"].render(
             phase="success", args=(), kwargs={}, result=model, error=None)
-        self.assertEqual("10 entities shown, 0 hidden, 1 links, 13 functions in 1 files", shown.args[1])
+        self.assertEqual("12 entities shown, 0 hidden, 1 links, 15 functions in 1 files", shown.args[1])
 
 
 if __name__ == "__main__":

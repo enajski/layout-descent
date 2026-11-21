@@ -141,6 +141,7 @@ goes to stdout.
 | Command | Writes | Purpose |
 | --- | --- | --- |
 | `facts <src-dir>... [--limit N] [--min-depth N] [--writes true\|false]` | nothing | Path shapes of `get-in`, `get`, `reduce-kv` and others, with sites |
+| `discover <src-dir> [--lang clj\|cljs]` | nothing | Find guarded map-entry scans, candidate membership views and possible writes; no plan required |
 | `flow <src-dir> --operation <namespace/function> [--lang clj\|cljs]` | nothing | Named fields an operation produces, carries or uses; source sites and unresolved boundaries |
 | `schema <src-dir> [--lang clj\|cljs] [--limit N] [--entity <id>\|loose] [--sites N] [--diagram <file.md\|file.mmd>]` | the file of `--diagram` | The data model of a code base: entities, the fields that one carries into another, and where the traces stopped |
 | `check <plan>` | nothing | Validate; hash, task, warnings or problems |
@@ -275,6 +276,9 @@ the possible result. This does not link a later `@state` to that write, count re
 
 This bounded **static** slice follows:
 
+- `binding` with resolved Var names: initializers see the outer scope, and the body sees the new
+  values. Bound values do not propagate into calls yet. `flow` marks affected callee reads as
+  unresolved, and `schema` marks named calls made inside a binding as boundaries;
 - fixed-arity calls, `let`, `:keys` (including qualified directives or symbols), positional vector
   bindings, and a `def` whose value is a literal map, vector or set;
 - the threads `->`, `->>`, `as->`, `some->`, `some->>`, `cond->` and `cond->>`;
@@ -451,6 +455,10 @@ clojure -M:cli:test              # plan, gen, gate, bench, facts, flow, schema, 
 clojure -M:cli:test facts plan   # only the named test namespaces
 python3 test/extension_test.py   # the Vis entry file, with a stub of the SDK
 ```
+
+## Discover a filtered view
+
+`discover case-studies/rotten/flow-src` looks for `(doseq [[key record] collection] (when (:field record) ...))`. A result is a hypothesis, not a patch: inspect its consumer calls and possible writers, including whole-record replacements. Root names are clues, not alias analysis. No match does not rule out other refactors. Check ordering and ownership before measuring on the application runtime.
 
 ## Limits
 

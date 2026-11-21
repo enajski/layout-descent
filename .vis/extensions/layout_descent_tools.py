@@ -20,6 +20,9 @@ layout-descent ({ROOT}) searches for the data layout that serves the access patt
 map fastest. A plan file (EDN) states the task (:levels, :leaf, :patterns, :workload) and the
 layout decisions (:orders, :serve). The tools are in the `descent` namespace.
 
+`descent.discover(src_dir)` finds source evidence for filtered membership views without a plan.
+Treat possible writers as name-based leads, not proven ownership or a speedup.
+
 `descent.flow(src_dir, operation)` traces information through one operation. Its steps link origins,
 carriers and uses at source sites. It is step 2 of the loop, and it also answers a question about
 the code when there is no plan. Use the original .cljs sources; `lang="cljs"` selects that side of
@@ -180,6 +183,8 @@ def _summaries(command: str, result: dict[str, Any]) -> tuple[str, str, tuple[An
                 *((vis.ActivityText(result["hint"]),) if result.get("hint") else ()),
             ),
         )
+    if command == "discover":
+        return ("Filtered membership views", f"{len(result['opportunities'])} hypotheses; ownership and runtime cost unverified", ())
     if command == "flow":
         return (
             f"Information flow: {result['operation']}",
@@ -336,6 +341,11 @@ class Descent:
             *[_path(p) for p in paths],
             *_flags(limit=limit, min_depth=min_depth, writes="true" if writes else None),
         )
+
+    @vis.method(tag="observation", activity=_activity("discover", "Discover filtered views"))
+    def discover(self, src_dir: Annotated[str, "Source directory"], lang: Annotated[str | None, "clj or cljs"] = None, save: SavePath = None) -> dict[str, Any]:
+        """Find guarded map scans and possible maintenance sites; no plan or runtime measurement."""
+        return run_cli("discover", _path(src_dir), *_flags(lang=lang), *_save(save))
 
     @vis.method(tag="observation", activity=_activity("flow", "Trace information flow"))
     def flow(

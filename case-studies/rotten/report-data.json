@@ -1,0 +1,264 @@
+{
+ "repo": "https://github.com/enajski/rotten",
+ "task": {
+  "name": "rotten-world",
+  "task": "1a834223fff3",
+  "hash": "a232b4564182",
+  "levels": [
+   {
+    "id": "x",
+    "type": "long"
+   },
+   {
+    "id": "y",
+    "type": "long"
+   }
+  ],
+  "leaf": "object",
+  "objective": {
+   "ns_per_byte": 0.0,
+   "min_gain": 0.05
+  }
+ },
+ "patterns": [
+  {
+   "bound_levels": 2,
+   "returns": "the leaf, or nil when the path is absent",
+   "call": "(tile ds x y)",
+   "bind": [
+    "key",
+    "key"
+   ],
+   "perm": [
+    0,
+    1
+   ],
+   "fold": null,
+   "order": 0,
+   "pattern": "tile",
+   "indexed_levels": 2,
+   "weight": 900,
+   "format": "hash"
+  },
+  {
+   "bound_levels": 0,
+   "returns": "the unordered reduction; f is called as (f acc x y leaf). Use an order-independent reducer; (reduced value) stops the scan and returns value",
+   "call": "(seen-scan ds f init)",
+   "bind": [
+    "scan",
+    "scan"
+   ],
+   "perm": [
+    0,
+    1
+   ],
+   "fold": null,
+   "order": 0,
+   "pattern": "seen-scan",
+   "indexed_levels": 0,
+   "weight": 1,
+   "format": "hash"
+  }
+ ],
+ "workload": {
+  "fanout": [
+   30,
+   30
+  ],
+  "fill": [
+   1.0,
+   1.0
+  ],
+  "seed": 7,
+  "weights": {
+   "tile": 900,
+   "seen-scan": 1
+  }
+ },
+ "notes": "Vector keys [x y] modeled as two long levels; tile maps as object leaves. Writes (move-entity, mark-tile-as-seen) stay on the persistent map; the dataset is a read-only render/query snapshot. Weights approximate one rendered frame: FOV radius 10 ~ 314 cells x ~3 tile reads ~ 900 point reads : 1 full-world scan.",
+ "plans": [
+  {
+   "hash": "a232b4564182",
+   "label": "Kept: [0 1] :hash (persistent-map equivalent)",
+   "role": "final",
+   "cost": 14.337,
+   "time_ns": 14.337,
+   "noise": 0.024,
+   "bytes": 53088,
+   "entries": 900,
+   "patterns": [
+    {
+     "pattern": "tile",
+     "ns": 12.038,
+     "spread": 0.021,
+     "weight": 900,
+     "order": 0,
+     "reps": 5050
+    },
+    {
+     "pattern": "seen-scan",
+     "ns": 2083.431,
+     "spread": 1.993,
+     "weight": 1,
+     "order": 0,
+     "reps": 1714
+    }
+   ]
+  },
+  {
+   "hash": "27c6a579b177",
+   "label": "Candidate: [0 1] :csf",
+   "role": "rejected",
+   "cost": 19.939,
+   "time_ns": 19.939,
+   "noise": 0.032,
+   "bytes": 29284,
+   "entries": 900,
+   "patterns": [
+    {
+     "pattern": "tile",
+     "ns": 18.776,
+     "spread": 0.031,
+     "weight": 900,
+     "order": 0,
+     "reps": 3311
+    },
+    {
+     "pattern": "seen-scan",
+     "ns": 1066.825,
+     "spread": 1.107,
+     "weight": 1,
+     "order": 0,
+     "reps": 3690
+    }
+   ]
+  }
+ ],
+ "descend": {
+  "ok": true,
+  "command": "descend",
+  "start": "a232b4564182",
+  "final": "a232b4564182",
+  "verdict": "no-change",
+  "gain": null,
+  "measured": null,
+  "steps": [
+   {
+    "from": "a232b4564182",
+    "cost": 14.587,
+    "bytes": 53088,
+    "patterns": [
+     {
+      "pattern": "tile",
+      "ns": 12.3
+     },
+     {
+      "pattern": "seen-scan",
+      "ns": 2072.888
+     }
+    ],
+    "candidates": [
+     {
+      "hash": "27c6a579b177",
+      "move": {
+       "op": "set-format",
+       "order": 0,
+       "format": "csf"
+      },
+      "cost": 20.268,
+      "bytes": 29284,
+      "verdict": "worse",
+      "patterns": [
+       {
+        "pattern": "tile",
+        "ns": 19.107
+       },
+       {
+        "pattern": "seen-scan",
+        "ns": 1065.366
+       }
+      ]
+     }
+    ],
+    "chosen": null,
+    "stopped": "No neighbor is better."
+   }
+  ],
+  "stopped": "No neighbor is better.",
+  "candidate": null,
+  "journal": "/Users/wojtekfranke/workspace/layout-descent/case-studies/rotten/plan.edn.journal",
+  "next": "Keep the plan. A hand-written candidate may still be better: neighbors are one decision away only."
+ },
+ "evaluate": {
+  "verdict": "worse",
+  "gain": -0.391,
+  "delta_ns": -5.602,
+  "noise_ns": 0.167,
+  "sensitivity": {
+   "depends_on_weights": true,
+   "summary": "The candidate wins on some patterns and loses on others: the verdict depends on :weights. flip_factor is the multiple of one weight that reverses the sign of the difference.",
+   "memory_ns": 0.0,
+   "patterns": [
+    {
+     "pattern": "tile",
+     "weight": 900,
+     "delta_ns": -6.738,
+     "net_ns": -6.738,
+     "noise_ns": 0.157,
+     "effect": "worse",
+     "flip_factor": 0.168
+    },
+    {
+     "pattern": "seen-scan",
+     "weight": 1,
+     "delta_ns": 1016.606,
+     "net_ns": 1016.606,
+     "noise_ns": 9.299,
+     "effect": "better",
+     "flip_factor": 5.965
+    }
+   ]
+  },
+  "next": "Keep the plan. Try another candidate."
+ },
+ "journal": [
+  {
+   "baseline": "a232b4564182",
+   "holdout": null,
+   "candidate": "27c6a579b177",
+   "task": "1a834223fff3",
+   "candidate-cost": 19.938808020343682,
+   "patterns": [
+    {
+     "pattern": "tile",
+     "baseline-ns": 12.038081683168317,
+     "candidate-ns": 18.77560121564482
+    },
+    {
+     "pattern": "seen-scan",
+     "baseline-ns": 2083.4305717619604,
+     "candidate-ns": 1066.8249322493225
+    }
+   ],
+   "op": "evaluate",
+   "at": "2026-11-20T19:35:10.115781Z",
+   "gain": -0.3907166401920106,
+   "verdict": "worse",
+   "baseline-bytes": 53088,
+   "objective": {
+    "ns-per-byte": 0.0,
+    "min-gain": 0.05
+   },
+   "baseline-cost": 14.337074457950552,
+   "rounds": 15,
+   "candidate-bytes": 29284
+  }
+ ],
+ "sources": {
+  "plan": "{:layout/version 1\n :name rotten-world\n ;; Task grounded in rotten (github.com/enajski/rotten), a rot.js roguelike:\n ;; db.cljs world = {[x y] tile}, a dense 30x30 maze grid (generate-maze,\n ;; core.cljs:217). The vector coordinate key is modeled as two :long levels.\n ;; Leaf is the tile map {:tile/kind ... :tile/walkable? ...} -> :object.\n ;; Writes (move-entity, mark-tile-as-seen, ...) stay on the persistent map;\n ;; the dataset is a read-only render/query snapshot, rebuilt after writes.\n :levels [{:id :x :type :long}\n          {:id :y :type :long}]\n :leaf {:type :object}\n :patterns [{:id :tile :bind [:key :key]\n             :doc \"point tile read: get-tile, is-walkable?, light-passes?, FOV draw\"\n             :sites [\"db.cljs:56 get-tile\" \"core.cljs:44 is-walkable?\"\n                     \"core.cljs:200 light-passes?\" \"core.cljs:285 with-360-fov\"]}\n            {:id :seen-scan :bind [:scan :scan]\n             :doc \"full world reduction: display-seen each frame; also the filter of get-random-empty-location\"\n             :sites [\"core.cljs:296 display-seen\" \"core.cljs:49 get-random-empty-location\"]}]\n ;; Baseline: the persistent nested map the game actually uses.\n :orders [{:perm [0 1] :format :hash}]\n ;; Per frame: FOV radius 10 ~ 314 cells x ~3 tile reads ~ 900 point reads,\n ;; plus one full-world scan (display-seen). A* and random-location add\n ;; occasional points/scans between frames; the frame mix dominates.\n :workload {:fanout [30 30]\n            :fill [1.0 1.0]\n            :seed 7\n            :weights {:tile 900 :seen-scan 1}}\n :objective {:min-gain 0.05 :ns-per-byte 0.0}\n :emit {:ns rotten-world.layout\n        :path \"src/rotten_world/layout.clj\"}\n :notes \"rotten case study: dense 30x30 grid, point-dominated render loop.\n         Vector keys [x y] modeled as two long levels; tile maps as object leaves.\n         Weights approximate one rendered frame (900 FOV/path point reads : 1 full scan).\"}\n",
+  "emitted": ";; GENERATED by layout-descent from plan a232b4564182. Do not edit: change the plan and emit again.\n(ns rotten-world.layout\n  \"Layout rotten-world, compiled from plan a232b4564182.\"\n  (:require [layout-descent.rt :as rt]))\n\n(set! *warn-on-reflection* true)\n\n(def plan-hash \"a232b4564182\")\n\n(def descriptor\n  '{:types [:long :long], :leaf :object, :orders [{:perm [0 1], :format :hash}]})\n\n(defn build\n  \"Compile a nested map into the dataset that the functions of this namespace read.\"\n  [data]\n  (rt/build-dataset descriptor data))\n\n(defn tile\n  \"Pattern :tile [:key :key], served by order 0 [0 1] :hash.\n  Returns the leaf, or nil when the path is absent.\"\n  {:arglists '([ds x y])}\n  [^layout_descent.rt.Dataset ds k0 k1]\n  (let [^java.util.HashMap n0 (aget ^objects (.-orders ds) 0)]\n    (let [n1 (.get ^java.util.HashMap n0 (if (int? k0) (long k0) (rt/wide-long-key k0)))]\n      (when-not (nil? n1)\n        (let [leaf (.get ^java.util.HashMap n1 (if (int? k1) (long k1) (rt/wide-long-key k1)))]\n          (when-not (nil? leaf)\n            leaf))))))\n\n(defn seen-scan\n  \"Pattern :seen-scan [:scan :scan], served by order 0 [0 1] :hash.\n  Returns the unordered reduction; f is called as (f acc x y leaf). Use an order-independent reducer; (reduced value) stops the scan and returns value.\"\n  {:arglists '([ds f init])}\n  [^layout_descent.rt.Dataset ds f init]\n  (let [^java.util.HashMap n0 (aget ^objects (.-orders ds) 0)\n        cell (object-array 2)]\n    (aset cell 0 init)\n    (let [it0 (.iterator (.entrySet ^java.util.HashMap n0))]\n      (while (and (nil? (aget cell 1)) (.hasNext it0))\n        (let [^java.util.Map$Entry e0 (.next it0)\n              s0 (.getKey e0)\n              n1 (.getValue e0)]\n          (let [it1 (.iterator (.entrySet ^java.util.HashMap n1))]\n            (while (and (nil? (aget cell 1)) (.hasNext it1))\n              (let [^java.util.Map$Entry e1 (.next it1)\n                    s1 (.getKey e1)\n                    leaf (.getValue e1)]\n                (let [next (f (aget cell 0) s0 s1 leaf)]\n                  (if (reduced? next)\n                    (do (aset cell 0 @next) (aset cell 1 true))\n                    (aset cell 0 next)))))))))\n    (aget cell 0)))\n",
+  "db_get_tile": "(defn get-tile [x y]\n  (get-in @state [:world [x y]]))",
+  "display_seen": "(defn display-seen [world]\n  (doseq [[[x y] tile] world]\n    (when (:tile/seen? tile)\n      (draw-tile x y tile)\n      (draw-seen-overlay x y))))",
+  "fov": "(defn with-360-fov [origin-x origin-y range world]\n  (.compute FOVHandler origin-x origin-y range\n            (fn [x y r _visibility]\n              (when (db/get-tile x y)\n                (db/mark-tile-as-seen x y)\n                (draw-tile x y (get world [x y]))\n                (doseq [entity (db/get-tile-entities x y)]\n                  (draw-entity x y entity))))))"
+ }
+}
