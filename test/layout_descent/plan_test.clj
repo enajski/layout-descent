@@ -192,3 +192,19 @@
     (is (str/includes? (:message warning) "reaches only 0 of them before it must scan."))
     (is (str/ends-with? (:message warning)
                         "A gain from adding an order for this pattern measures the missing index, not the layout format."))))
+
+(deftest split-keeps-the-orders-of-two-plans
+  (let [base (fx/normal fx/small-risk)
+        csf (assoc-in base [:orders 0 :format] :csf)
+        both (plan/split base csf [:tenant-size])]
+    (is (= [{:perm [0 1 2] :format :hash} {:perm [0 1 2] :format :csf}] (:orders both)))
+    (is (= {:value 0 :entity-features 0 :feature-total 0 :tenant-size 1} (:serve both)))
+    (is (= (plan/task-key base) (plan/task-key both)))
+    (is (not-any? #(= (plan/plan-hash both) (:hash %)) (plan/neighbors base)) "no single move reaches it")
+    (testing "an order that both plans have is not stored twice"
+      (let [wide (fx/with-order fx/small-risk [2 0 1] :csf [:feature-total])
+            other (assoc-in wide [:orders 0 :format] :csf)]
+        (is (= 3 (count (:orders (plan/split wide other [:value])))))))
+    (testing "the ends of the split are the two plans"
+      (is (= (plan/plan-hash base) (plan/plan-hash (plan/split base csf []))))
+      (is (= (plan/plan-hash csf) (plan/plan-hash (plan/split base csf (map :id (:patterns base)))))))))

@@ -69,14 +69,16 @@ class ExtensionTest(unittest.TestCase):
         self.assertEqual("layout-descent", extension.alias)
         self.assertEqual(["descent"], [s.name for s in extension.symbols])
         self.assertIn("accept", extension.prompt)
-        for rule in ("not the command line in a shell", "no claim of direction", "numbers of one run", ":notes"):
+        for rule in ("not the command line in a shell", "no claim of direction", "numbers of one run", ":notes",
+                     "pass `save`", "Do not\n  parse the EDN files", "Do not call a result an optimum",
+                     "range of the\n  estimate", "clojurescript-sources"):
             self.assertIn(rule, extension.prompt)
 
     def test_every_tool_has_a_tag_an_activity_and_a_docstring(self):
         tools = [n for n in dir(self.descent) if not n.startswith("_")]
         self.assertEqual(
-            ["accept", "check", "descend", "emit", "evaluate", "facts", "journal", "measure", "neighbors",
-             "status", "verify"],
+            ["accept", "check", "descend", "emit", "evaluate", "facts", "flow", "journal", "measure", "neighbors",
+             "report", "status", "verify"],
             tools,
         )
         for name in tools:
@@ -99,11 +101,22 @@ class ExtensionTest(unittest.TestCase):
             self.descent.facts(["/src"])
             self.descent.measure(["/a.edn", "plans/b.edn"], rounds=5)
             self.descent.journal("/a.edn", last=3)
+            self.descent.report("/a.edn")
+            self.descent.descend("/a.edn", save="out/trace.json")
+            self.descent.flow("src", "orders/settle", save="out/flow.json")
+            self.descent.flow("/src", "shared/act", lang="cljs")
         commands = [call.args[0][2:] for call in run.call_args_list]
         self.assertEqual(["facts", "/src", "--limit", "0", "--min-depth", "2", "--writes", "true"], commands[0])
         self.assertEqual(["facts", "/src", "--limit", "5", "--min-depth", "2"], commands[1])
         self.assertEqual(["measure", "/a.edn", str(ROOT / "plans/b.edn"), "--rounds", "5"], commands[2])
         self.assertEqual(["journal", "/a.edn", "--last", "3"], commands[3])
+        self.assertEqual(["report", "/a.edn"], commands[4])
+        self.assertEqual(
+            ["descend", "/a.edn", "--max-steps", "4", "--save", str(ROOT / "out/trace.json")], commands[5])
+
+        self.assertEqual(["flow", str(ROOT / "src"), "--operation", "orders/settle", "--save", str(ROOT / "out/flow.json")],
+                         commands[6])
+        self.assertEqual(["flow", "/src", "--operation", "shared/act", "--lang", "cljs"], commands[7])
 
     def test_a_refusal_is_an_answer_and_a_usage_error_is_an_exception(self):
         refusal = {"ok": False, "error": {"code": "not_measured", "message": "m", "hint": "h"}}
@@ -140,6 +153,17 @@ class ExtensionTest(unittest.TestCase):
                 {"hash": "a", "cost": 7.25, "bytes": 64, "patterns": [{"pattern": "p", "ns": 7.25}]}]})
         self.assertEqual(("Plans measured", "1 plans of task t on 9 entries"), table.args)
         self.assertEqual((["Hash", "Cost", "Bytes", "p ns"], [["a", "7.2", "64", "7.2"]]), table.content[0].args)
+        descend = self.descent.descend.vis_meta["activity"].render
+        kept = descend(phase="success", args=(), kwargs={}, error=None, result={
+            "ok": True, "verdict": "no-change", "start": "a", "final": "a", "steps": [{"chosen": None}],
+            "reach": {"timed": 2}, "stopped": "No candidate is better."})
+        self.assertEqual(
+            ("Descent is no-change", "0 steps from a to a, 2 candidates timed. No candidate is better."), kept.args)
+        facts = self.descent.facts.vis_meta["activity"].render
+        empty = facts(phase="success", args=(), kwargs={}, error=None, result={
+            "ok": True, "site_count": 3, "files": 1, "shapes": [], "hidden": {"shapes": 2},
+            "warnings": [{"code": "clojurescript-sources", "message": "JVM only."}], "hint": "Lower min-depth."})
+        self.assertEqual(["JVM only.", "Lower min-depth."], [c.args[0] for c in empty.content])
 
     @unittest.skipUnless(shutil.which("clojure"), "needs the clojure command")
     def test_the_real_command_line_answers(self):

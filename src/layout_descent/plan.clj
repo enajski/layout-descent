@@ -405,6 +405,29 @@
                  [#{} []])
          second)))
 
+(defn split
+  "The plan that keeps the orders of plan and of other, a plan of the same task. The patterns in
+  from-other are served by the order that serves them in other; the rest stay where plan serves
+  them. Orders that then serve no pattern are removed. No single move of `neighbors` reaches it
+  when other changed the format of an order."
+  [plan other from-other]
+  (let [plan (normalize plan)
+        other (normalize other)
+        decision (juxt :perm :format)
+        [orders index] (reduce (fn [[orders index] [i order]]
+                                 (if-let [at (first (keep-indexed #(when (= (decision %2) (decision order)) %1) orders))]
+                                   [orders (assoc index i at)]
+                                   [(conj orders order) (assoc index i (count orders))]))
+                               [(:orders plan) {}]
+                               (map-indexed vector (:orders other)))
+        moved (set from-other)]
+    (prune-unused
+     (assoc plan
+            :orders orders
+            :serve (into (sorted-map)
+                         (map (fn [[id s]] [id (if (moved id) (index (get (:serve other) id)) s)]))
+                         (:serve plan))))))
+
 ;; ---- files ----------------------------------------------------------------
 
 (defn- render-value [v pad]

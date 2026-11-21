@@ -179,10 +179,96 @@
         (is (= before (slurp (str path ".journal"))))
         (is (= "same_plan" (get-in (run "measure" path path) ["error" "code"])))
         (is (= 2 (get (run "measure") "exit")))))
+    (testing "reach counts what the walk timed and says what it does not try"
+      (let [reach (get answer "reach")
+            candidates (mapcat #(get % "candidates") (get answer "steps"))]
+        (is (= (count (distinct (map #(get % "hash") (filter #(get % "cost") candidates)))) (get reach "timed")))
+        (is (= (count candidates) (reduce + (map #(get % "candidates") (get reach "moves")))))
+        (is (every? string? (get reach "not_tried")))
+        (is (seq (get reach "not_tried")))
+        (is (= ["memory-not-priced"] (mapv #(get % "code") (get answer "warnings")))
+            "the final plan has two orders and the objective does not price memory")))
+    (testing "a step takes the better candidate with the largest gain, not the lowest cost of any batch"
+      (doseq [step (get answer "steps")
+              :let [timed (filter #(get % "cost") (get step "candidates"))
+                    better (filter #(= "better" (get % "verdict")) timed)
+                    chosen (get-in step ["chosen" "hash"])]]
+        (is (every? #(number? (get % "gain")) timed))
+        (when chosen
+          (is (= (apply max (map #(get % "gain") better))
+                 (get (first (filter #(= chosen (get % "hash")) better)) "gain"))))))
+    (testing "--save writes the answer, and never over a file of the plan"
+      (let [file (str (io/file dir "out" "status.json"))
+            answer (run "status" path "--save" file)
+            files #(set (map str (file-seq (io/file dir))))
+            before (files)]
+        (is (= [0 file] [(get answer "exit") (get answer "saved")]))
+        (is (= (dissoc answer "exit") (json/read-str (slurp file))))
+        (doseq [protected [path (str path ".journal")]
+                :let [text (slurp protected)]]
+          (is (= "path_collision" (get-in (run "status" path "--save" protected) ["error" "code"])))
+          (is (= "path_collision" (get-in (run "measure" path "--save" protected) ["error" "code"])))
+          (is (= text (slurp protected))))
+        (is (= 2 (get (run "status" path "--save" dir) "exit")))
+        (is (= before (files)))))
+    (testing "--save never names a file where the command writes or a source file that it reads"
+      (let [refused #(get-in (apply run %&) ["error" "code"])
+            kept (str (io/file dir "candidates" "any" "trace.edn"))
+            out-dir (str (io/file dir "nb"))
+            sources (io/file dir "sources")
+            source (str (io/file sources "sample" "core.clj"))
+            text "(ns sample.core)\n(defn value [m a b] (get-in m [a b]))\n"]
+        (io/make-parents source)
+        (spit source text)
+        (is (= "path_collision" (refused "descend" path "--max-steps" "1" "--save" kept)))
+        (is (= "path_collision" (refused "descend" path "--max-steps" "1" "--save"
+                                         (str (io/file dir "CANDIDATES" "any" "trace.json"))))
+            "candidates/ does not exist yet, so its letter case cannot be asked of the file system")
+        (is (= "path_collision" (refused "neighbors" path "--out-dir" out-dir "--save" (str (io/file out-dir "x" "y.edn")))))
+        (is (= "path_collision" (refused "neighbors" path "--out-dir" out-dir "--save" out-dir)))
+        (is (not (.exists (io/file out-dir))) "refused before the command wrote")
+        (is (= "path_collision" (refused "facts" (str sources) "--save" source)))
+        (is (= "path_collision" (refused "facts" (str sources) "--save" (str (io/file sources "sample" "CORE.CLJ")))))
+        (is (= text (slurp source)))))
+    (testing "status gives the workload as the plan states it"
+      (is (= {"fanout" [4 60 8] "fill" [1.0 0.9 0.6] "seed" 7} (get (run "status" path) "workload"))))
+    (testing "report holds what a report needs and writes nothing"
+      (let [files #(set (map str (file-seq (io/file dir))))
+            before (files)
+            report (run "report" path)
+            status (run "status" path)]
+        (is (= 0 (get report "exit")) (pr-str (get report "error")))
+        (is (= before (files)))
+        (is (= (dissoc status "journal" "command") (select-keys report (keys (dissoc status "journal" "command")))))
+        (is (= (slurp path) (get report "plan_text")))
+        (is (= (emit/source (plan/read-plan path)) (get report "source")))
+        (is (= (get (run "journal" path) "entries") (get-in report ["journal" "entries"])))
+        (is (= (dissoc (get status "journal") "last") (dissoc (get report "journal") "entries")))
+        (is (= [(get answer "final")] (mapv #(get % "hash") (get report "candidates"))))
+        (is (= (get-in answer ["steps" 0 "chosen" "path"]) (get-in report ["candidates" 0 "path"])))
+        (is (every? #(and (get % "pattern") (number? (get % "order"))) (get-in report ["candidates" 0 "serve"])))))
     (testing "descend does not write the plan; accept does"
       (is (= (get answer "start") (get (run "check" path) "hash")))
       (is (= 0 (get (run "accept" (get answer "candidate") "--into" path) "exit")))
       (is (= (get answer "final") (get (run "check" path) "hash"))))))
+
+(deftest a-split-is-offered-for-a-neighbor-that-wins-and-loses
+  (let [base (fx/normal fx/small-risk)
+        csf (assoc-in base [:orders 0 :format] :csf)
+        row (fn [faster slower] {:hash (plan/plan-hash csf) :plan csf :faster faster :slower slower})
+        splits #(#'cli/split-candidates base [%])
+        [split :as found] (splits (row [:tenant-size] [:value]))]
+    (is (= 1 (count found)))
+    (is (= {:op :split :with (plan/plan-hash csf) :serves [:tenant-size]} (:move split)))
+    (is (= (plan/plan-hash (plan/split base csf [:tenant-size])) (:hash split)))
+    (is (:gate-ok split))
+    (is (= 2 (count (:orders (:plan split)))))
+    (testing "a neighbor that only wins, or only loses, gives no split"
+      (is (= [] (splits (row [:tenant-size] []))))
+      (is (= [] (splits (row [] [:value])))))
+    (testing "a split that equals a timed candidate is not timed twice"
+      (is (= [] (#'cli/split-candidates base [(row [:tenant-size] [:value])
+                                              (assoc (row [] []) :hash (:hash split))]))))))
 
 (deftest notes-and-degree-pass-through-the-commands
   (let [dir (temp-dir)

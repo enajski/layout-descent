@@ -32,22 +32,34 @@ clojure -M:cli status /tmp/plan.edn
 
 One run of the example on the development machine, weighted mean ns for each call:
 
-| Plan | Orders | Cost | Step |
-| --- | --- | --- | --- |
-| `e471a80f71f4` | `[0 1 2] :hash` | 6773 | start |
-| `85b647ff5a1b` | `[0 1 2] :hash`, `[2 0 1] :csf` | 217 | `descend`, -96.8 % |
-| `4bd9518c54ef` | `[0 1 2] :csf`, `[2 0 1] :csf` | 185 | `descend`, -13.5 % |
+| Plan | Orders | Cost | Bytes | Step |
+| --- | --- | --- | --- | --- |
+| `e471a80f71f4` | `[0 1 2] :hash` | 6618 | 2,174,944 | start |
+| `85b647ff5a1b` | `[0 1 2] :hash`, `[2 0 1] :csf` | 219 | 2,616,144 | `descend`, -96.8 % |
+| `ed154bfaea1c` | `[0 1 2] :hash`, `[2 0 1] :csf`, `[0 1 2] :csf` | 173 | 3,078,624 | `descend`, split, -18.7 % |
 
 A candidate may be any valid plan of the task; `neighbors` and `descend` are only the mechanical
-baseline. They change one decision at a time, and a step is kept only when it is better alone.
-Plans that they do not reach:
+baseline. `neighbors` changes one decision at a time. `descend` adds one kind of candidate that
+needs measurements: when a neighbor is faster on one pattern and slower on another, a `split`
+keeps the orders of both plans and serves each pattern from the faster one. That is how
+`[0 1 2] :hash` can stand beside `[0 1 2] :csf`, the point lookup and the scan each with its format.
+A step is kept only when it is better alone.
 
-- **Two decisions at once**: an order added together with a format change of another order, or two
-  patterns moved to another order together.
-- **Both formats of one permutation**: `neighbors` adds an order only when it fixes a longer prefix
-  for some pattern, so it never puts `[0 1 2] :hash` beside `[0 1 2] :csf` to give the point lookup
-  and the scan each its format.
-- **A permutation that ties** on the bound prefix but stores the scanned levels in another order.
+A split adds an order, so it adds bytes. With `:ns-per-byte 0.0` those bytes are free and
+`descend` takes a split for a small gain in time; its answer then carries the warning
+`memory-not-priced` of the final plan. Set a price when memory counts. In the run above, the
+neighbor `4bd9518c54ef` (`[0 1 2] :csf`, `[2 0 1] :csf`) was also better in the last step, with
+903,680 bytes and a gain of 14.5 % against 19.3 % for the split. A step takes the better candidate
+with the largest gain against the plan of its own batch.
+
+`reach` in the answer of `descend` counts the candidates that were timed and lists what the search
+does not try:
+
+- **Two moves at once**, other than a split: an order added together with a format change of
+  another order, or two patterns moved to another order together.
+- **An added order that fixes no longer prefix**, such as a permutation that ties on the bound
+  prefix but stores the scanned levels in another order.
+- **The plans behind a better candidate** that did not have the largest gain of its step.
 
 Write such a plan by hand and give it to `evaluate`. Expect `no-change` often: on this example a
 third order `[0 1 2] :hash` measured -6.1 % at 3.4 times the memory, and on another task the same
@@ -115,16 +127,24 @@ goes to stdout.
 | Command | Writes | Purpose |
 | --- | --- | --- |
 | `facts <src-dir>... [--limit N] [--min-depth N] [--writes true\|false]` | nothing | Path shapes of `get-in`, `get`, `reduce-kv` and others, with sites |
+| `flow <src-dir> --operation <namespace/function> [--lang clj\|cljs]` | nothing | Named fields an operation produces, carries or uses; source sites and unresolved boundaries |
 | `check <plan>` | nothing | Validate; hash, task, warnings or problems |
-| `status <plan>` | nothing | Orders, patterns, calls, emitted file state and the cause when it is stale, last journal records |
+| `status <plan>` | nothing | Workload, orders, patterns, calls, emitted file state and the cause when it is stale, last journal records |
+| `report <plan>` | nothing | The fields of `status`, the plan text, the emitted source, every journal record and the kept candidates in one answer |
 | `journal <plan> [--last N]` | nothing | Every journal record as JSON; `unreadable_lines` counts lines that are no record |
 | `measure <plan>...` | nothing | Time plans of one task in one run: cost, bytes, ns of each pattern. No verdict |
 | `verify <plan> [--source <trusted-clojure-file>]` | nothing for generated code | The gate; `--source` executes the supplied file |
 | `neighbors <plan> [--out-dir <dir>]` | candidate files | Every plan one decision away |
 | `evaluate <candidate> --against <plan>` | journal | Gate both, time both, verdict, sensitivity to the weights |
-| `descend <plan> [--max-steps N] [--out <file>]` | the chosen plan of each step under `candidates/` beside the plan, journal | Greedy search; every step has cost, bytes and ns of each pattern |
+| `descend <plan> [--max-steps N] [--out <file>]` | the chosen plan of each step under `candidates/` beside the plan, journal | Greedy search over neighbors and splits; every step has cost, bytes and ns of each pattern; `reach` says how far it looked |
 | `accept <candidate> --into <plan> [--force <reason>]` | plan, emitted file, journal | Take the candidate's decisions |
 | `emit <plan> [--out <file>]` | optional preview file | Gate and preview the namespace; only `accept` writes the configured output |
+
+Every command takes `--save <file>`: the file gets the same JSON document, and the answer names
+it in `saved`. Only an answer with exit code 0 is saved; a refusal or a failure leaves the file as
+it was. These files are refused: a plan, its journal and its emitted file, a source file below a
+directory that the command reads, and any file below `candidates/` beside a plan or below
+`--out-dir`.
 
 Exit code 0: done. Exit code 1: refused or failed; `error.code` names the cause and `error.hint`
 the next step. Exit code 2: wrong usage or an internal error.
@@ -177,17 +197,73 @@ A lookup on the value inside the function of a scan continues the scan:
 `[:scan :key]`. A function handed to `swap!` is a write to the reference. A path that is not a
 literal vector is counted as `dynamic`.
 
+A key that is a vector literal, as in `(get-in state [:world [x y]])`, is one map level with a
+composite key. Its shape element is `"[? ?]"`, and each computed part counts as a level, because a
+plan models each part as a level of its own.
+
 The answer shows the shapes that can be a layout task. `hidden` counts the rest: shapes with fewer
 than `--min-depth` (default 2) computed levels, such as a lookup in a set, and the sites that
 write, which build the map and are no pattern. `--min-depth 1` and `--writes true` show them.
-`--limit 0` gives the counts with no sites. File names are relative to `root`. Facts decide
-nothing: you, or the model, write the plan from them.
+`--limit 0` gives the counts with no sites. File names are relative to `root`. When every shape is
+hidden, `hint` names the two options.
+
+`sources` counts the files by extension. With ClojureScript files the answer has the warning
+`clojurescript-sources`: plans are measured and emitted for the JVM, so the timings do not transfer
+to a JavaScript runtime and the emitted namespace does not load there. Facts decide nothing: you,
+or the model, write the plan from them.
+
+## Follow information through an operation
+
+`flow` starts at one function, scans the source directory for definitions, and follows resolved calls
+outward, including calls through namespace aliases. It does not load the application. For example:
+
+```sh
+clojure -M:cli flow test/fixtures/flow --operation shop.order/settle
+clojure -M:cli flow test/fixtures/flow --operation board.game/act   # original .cljs sources
+clojure -M:cli flow src --operation layout-descent.bench/summarize --save /tmp/summarize.json
+```
+
+- **Follow an operation:** `steps` are graph nodes with an `id`, `kind`, `via`, enclosing function
+  (`in`), relative `file`, `row` and `col`. `inputs` point to the steps that supply values. A lookup's
+  `container` identifies what carried the value; a `choice` can also name its `control` step. IDs are
+  local to this answer. Both sides of a branch are possible; a map body is shown once, not once per item.
+- **Follow a fact:** find a `fields` row by field spelling and origin (`at`, a step ID). `uses` lists
+  later step IDs by kind. Two `:price` keys need not have the same source. In the fixture, catalog
+  `:price` is carried into `:sale-price`, then into `:receipt-price`. Multiplication **consumes** the
+  sale price; `:amount` is a new fact whose input is the multiplication, not another name for price.
+  A `write` means the value crossed a boundary and its origin is not known.
+- **Ask a layout question:** `iterate`, `collect`, `inspect`, `pass` and `return` show how values move
+  apart from their use in a calculation. For example, in `bench/summarize` the same sample vector goes
+  to `median` directly and to `median` inside `spread`. Before changing that, measure the frequency,
+  time and allocation of the whole operation and check that both its center and spread are unchanged.
+
+The trace uses one language (`language`): `.clj` or `.cljs` plus that side of `.cljc`. There is no need
+to rename source files. An entry defined on only one platform selects it; if shared, the default is
+CLJS in a tree with `.cljs` and no `.clj`, otherwise CLJ. Set `--lang clj|cljs` (`lang=` in Vis) to
+choose explicitly. Only the static analysis is cross-platform; layout benchmarks still run on the JVM.
+
+A read of `(get-in @state [:world [x y] :tile/kind])` keeps the path `[":world" "[? ?]" ":tile/kind"]`.
+`[? ?]` is **one** computed key. Its boundary names the `key_input` step, not a runtime address.
+Two reads or writes with this shape need not touch the same tile. For `[id value]` destructuring,
+`project` names the index and links just that element if known. Variadic bindings are not inferred.
+A `state_read` snapshot is open: `swap!` traces the update function from it and `state_write` identifies
+the possible result. This does not link a later `@state` to that write, count retries or trace watchers.
+
+This bounded **static** slice follows fixed-arity calls, `let`, simple `:keys` and positional vector
+bindings, `->`/`->>`/`as->`, possible `case`/`and`/`or` paths, map access/update functions (including
+when passed to `swap!`), and single-collection `map`/`mapv`. A field first read from input is not
+proof of its business producer. Dynamic keys, unresolved callbacks, JS interop,
+unsupported macros, external calls (including serialization) and recursion are `boundaries`, not
+proof that a value is unused. Check `unparsed` and `truncated` (2,048 steps; call depth 32 ends at
+a boundary). Counts are source evidence, **not** hotness, bytes or a license to drop a field. No
+plan, accepted layout, journal or source is changed. `--save` optionally writes the graph as JSON.
 
 ## Vis extension
 
 `.vis/extensions/layout_descent_tools.py` registers the namespace `descent` with one tool for each
-command: `descent.facts`, `check`, `status`, `journal`, `measure`, `verify`, `neighbors`,
-`evaluate`, `descend`, `accept` and `emit`. Each tool runs the command line and returns its answer as a dict. A refusal
+command: `descent.facts`, `flow`, `check`, `status`, `report`, `journal`, `measure`, `verify`, `neighbors`,
+`evaluate`, `descend`, `accept` and `emit`. `flow`, `report`, `journal`, `measure`, `evaluate` and `descend`
+take `save`. Each tool runs the command line and returns its answer as a dict. A refusal
 is a returned answer with `ok` false; only a usage or internal error raises. Vis loads the file
 when this project is in the workspace; reload Vis after a change.
 
@@ -228,7 +304,14 @@ Commit the plan and the emitted file together. `status` says `stale` when they d
   Compare the final plan with the best plan that has the same indexes, too.
 - With `:ns-per-byte 0.0` memory is free and an extra order can only help. Give the bytes beside
   the cost, or set a price.
-- Say what the plan models: the code that was named, or a benchmark of it.
+- Say what the plan models: the code that was named, or a benchmark of it. When `facts` warns of
+  ClojureScript sources, say that the timings are JVM timings.
+- Do not call a result an optimum. Give `reach.timed`, the number of candidates that `descend`
+  timed; the result holds inside that reach.
+- When the weights are an estimate, give the range of the estimate and say whether a flip point,
+  the weight times its `flip_factor`, is inside it.
+- Read plans and journals through `status`, `report` and `journal`, not by parsing the files. Keep
+  a whole answer with `--save`, not with a shell redirect.
 
 ## Tests
 
@@ -245,6 +328,11 @@ python3 test/extension_test.py   # the Vis entry file, with a stub of the SDK
 - The workload is synthetic: fanout, fill or degree, seed and weights. It is your statement of
   the task, not a replay of production traffic or of real data.
 - Call sites are not rewritten for you. `facts` gives the sites and `status` the calls.
+- Plans are measured and emitted for the JVM only.
+- The noise of a verdict is the spread inside one run. Two runs can time the same layout much
+  further apart than that; the cause is not known. For one pair of plans of a case study, 13 runs
+  gave gains from -12 % to +16 %, with `:min-gain` at 5 %. Repeat `evaluate` before you act on a
+  gain of that size, and read runs that disagree as `no-change`.
 - `:bytes` is an estimate from entry counts, not a heap measurement.
 - At most four levels. One leaf type for each plan.
 - `neighbors` proposes an order only when it gives some pattern a longer bound prefix.

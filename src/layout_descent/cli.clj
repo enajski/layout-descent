@@ -23,10 +23,14 @@
     :doc "List the commands."}
    {:name "facts" :usage "facts <src-dir>... [--limit N] [--min-depth N] [--writes true|false]" :writes "nothing"
     :doc "Where a code base reads and scans nested maps, grouped by path shape. Shapes with fewer than --min-depth (2) computed levels and write sites are counted in `hidden`. --limit 0 gives counts only."}
+   {:name "flow" :usage "flow <src-dir> --operation <namespace/function> [--lang clj|cljs]" :writes "nothing"
+    :doc "Follow named map fields through one Clojure operation and its resolved callees. Steps, uses and unresolved boundaries are static evidence, not timings."}
    {:name "check" :usage "check <plan>" :writes "nothing"
     :doc "Validate a plan file. Gives its hash, task and warnings, or its problems."}
    {:name "status" :usage "status <plan>" :writes "nothing"
-    :doc "The plan in full: which order serves each pattern, the emitted functions and why they are stale, the last journal records."}
+    :doc "The plan in full: its workload, which order serves each pattern, the emitted functions and why they are stale, the last journal records."}
+   {:name "report" :usage "report <plan>" :writes "nothing"
+    :doc "Everything for a report in one answer: the fields of status, the text of the plan file, the source that emit would write, every journal record, and the candidate plans kept under candidates/."}
    {:name "journal" :usage "journal <plan> [--last N]" :writes "nothing"
     :doc "Every record of <plan>.journal as JSON: evaluations with per-pattern numbers, acceptances."}
    {:name "measure" :usage "measure <plan>... [--rounds N] [--warm-ms N]" :writes "nothing"
@@ -40,7 +44,7 @@
     :doc "Gate both plans, time them on the same data, and give a verdict: better, worse or no-change. `sensitivity` says whether the verdict depends on :weights."}
    {:name "descend" :usage "descend <plan> [--max-steps N] [--out <file>] [--rounds N] [--warm-ms N]"
     :writes "the chosen plan of every step under candidates/ beside the plan, the final one also at --out, lines in <plan>.journal"
-    :doc "Greedy search over neighbors. Every step gives cost, bytes and per-pattern ns of the plan and of each neighbor. A baseline for the search, and a candidate to accept."}
+    :doc "Greedy search over neighbors. Every step gives cost, bytes and per-pattern ns of the plan and of each neighbor. When a neighbor is faster on one pattern and slower on another, the step also times a `split` that keeps the orders of both. `reach` says how many candidates were timed and what the search does not try."}
    {:name "accept" :usage "accept <candidate> --into <plan> [--force <reason>]"
     :writes "<plan>, its emitted file, one line in <plan>.journal"
     :doc "Move the orders of a candidate into the plan. Needs a better verdict in the journal."}
@@ -48,13 +52,14 @@
     :doc "Gate and return source, or write a preview to --out. Only accept writes the configured emitted file."}])
 
 (def ^:private flags-of
-  {"help" #{} "facts" #{:limit :min-depth :writes} "check" #{} "status" #{} "journal" #{:last}
+  {"help" #{} "facts" #{:limit :min-depth :writes} "flow" #{:operation :lang} "check" #{} "status" #{} "report" #{} "journal" #{:last}
    "measure" #{:rounds :warm-ms} "verify" #{:source} "neighbors" #{:out-dir}
    "evaluate" #{:against :rounds :warm-ms} "descend" #{:max-steps :out :rounds :warm-ms}
    "accept" #{:into :force} "emit" #{:out}})
 
 (def ^:private hints
   {:usage "Run `help` for the commands and their arguments."
+   :flow-operation "Choose a unique top-level defn in the selected language; use --lang clj or --lang cljs for .cljc sources. See unparsed for unreadable files."
    :unreadable-plan "The file must hold one EDN map. See examples/risk/plan.edn."
    :invalid-plan "Fix every entry of `problems`; `path` is the place in the plan."
    :task-mismatch "A candidate keeps :levels, :leaf, :patterns and :workload of the plan. Change only :orders and :serve."
@@ -73,7 +78,7 @@
 ;; ---- arguments ------------------------------------------------------------
 
 (defn- parse-args [command args]
-  (let [allowed (get flags-of command)]
+  (let [allowed (conj (get flags-of command) :save)]
     (loop [args args
            positional []
            flags {}]
@@ -318,13 +323,14 @@
 (defmethod command "help" [_ _]
   {:commands commands
    :exit-codes {:done 0 :refused-or-failed 1 :usage-or-internal 2}
+   :every-command {:save "--save <file> also writes the answer, the same JSON document, to the file and names it in `saved`. A refusal or a failure is not saved and leaves the file as it was. The file cannot be a plan, its journal or its emitted file, a source file that the command reads, or a file below candidates/ or --out-dir."}
    :loop ["facts <src-dir> to see the access shapes of the code"
           "write a plan: levels, leaf, patterns, one order, a workload"
           "check, then verify"
           "descend <plan>, or neighbors, or write a candidate that keeps the task"
           "evaluate <candidate> --against <plan>"
           "accept <candidate> --into <plan> when the verdict is better"
-          "for a report: the steps of descend, measure <plan>..., journal <plan>"]})
+          "for a report: descend --save <file>, measure <plan>..., report <plan>"]})
 
 (defmethod command "facts" [_ {:keys [positional flags]}]
   (when (empty? positional)
@@ -342,7 +348,20 @@
                                  (fail :usage "--writes must be true or false."))})
            :legend {:? "a key that the code computes: a :key level"
                     :* "every key: a :scan level"
+                    "[? ?]" "one key that is a vector: model each computed part as a level; a constant part is part of the schema"
                     :other "a constant: part of the schema, not a level"})))
+
+(defmethod command "flow" [_ {:keys [positional flags]}]
+  (let [[dir] positional
+        op (:operation flags)
+        lang (some-> (:lang flags) keyword)]
+    (when (and lang (not (#{:clj :cljs} lang))) (fail :usage "--lang must be clj or cljs."))
+    (when-not (and (= 1 (count positional)) (.isDirectory (io/file ^String dir))
+                   op (re-matches #"[^/\s]+/[^/\s]+" op))
+      (fail :usage "Usage: flow <src-dir> --operation <namespace/function> [--lang clj|cljs]."))
+    (let [files ((requiring-resolve 'layout-descent.flow/source-files) dir)]
+      (separate! (:save flags) files)
+      ((requiring-resolve 'layout-descent.flow/analyze) dir files op lang))))
 
 (defmethod command "check" [_ args]
   (let [path (one-path "check" args)
@@ -365,6 +384,11 @@
      :task (plan/task-hash plan)
      :levels (:levels plan)
      :leaf (:type (:leaf plan))
+     ;; The weights are in :patterns: a pattern id as a JSON key would lose its hyphens.
+     ;; bigdec: the answer rounds a double to three places, and a fill must read back exactly.
+     :workload (-> (:workload plan)
+                   (dissoc :weights)
+                   (update :fill (partial mapv bigdec)))
      :orders (vec (map-indexed (fn [i order] (assoc order :order i)) (:orders plan)))
      :patterns (served plan)
      :warnings (plan/warnings plan)
@@ -374,6 +398,29 @@
                :accept-pending (.exists (io/file (pending-path path)))
                :records (count records)
                :last (vec (take-last 5 records))})))
+
+(defmethod command "report" [_ args]
+  (let [path (one-path "report" args)
+        status (command "status" args)
+        plan (plan/read-plan path)
+        records (journal path)
+        kept (io/file (beside path "candidates") (plan/task-hash plan))]
+    (concat (dissoc status :journal)
+            [[:plan-text (slurp path)]
+             [:source (emit/source plan)]
+             [:journal (-> (:journal status) (dissoc :last) (assoc :entries (vec records)))]
+             [:candidates (vec (for [^File file (sort (.listFiles kept))
+                                     :when (str/ends-with? (.getName file) ".edn")
+                                     :let [candidate (try (plan/read-plan (str file)) (catch Exception _ nil))]]
+                                 (cond
+                                   (nil? candidate) {:path (str file) :unreadable true}
+                                   (not= (plan/task-hash plan) (plan/task-hash candidate))
+                                   {:path (str file) :other-task true}
+                                   :else
+                                   (array-map :hash (plan/plan-hash candidate)
+                                              :path (str file)
+                                              :orders (:orders candidate)
+                                              :serve (mapv (fn [[id i]] {:pattern id :order i}) (:serve candidate))))))]])))
 
 (defmethod command "journal" [_ {:keys [flags] :as args}]
   (let [path (one-path "journal" args)
@@ -471,17 +518,64 @@
          second
          (mapv #(assoc % :gate-ok (:ok (gate/verify (:plan %))))))))
 
+(defn- score
+  "Time candidates with the current plan in one run. Returns the summary of the current plan and
+  the candidates with their numbers. :faster and :slower name the patterns that a candidate serves
+  faster or slower than the plan, by time alone and beyond three times the noise. A run times the
+  candidates in batches, each with the plan again, so :gain and :verdict compare a candidate with
+  the plan of its own batch. Costs of two batches do not compare; gains do."
+  [current candidates opts]
+  (let [[base & summaries] (when (seq candidates) (bench/measure (into [current] (map :plan candidates)) opts))]
+    [base
+     (mapv (fn [c s]
+             (let [b (or (:batch-baseline s) base)
+                   rows (:patterns (bench/weight-sensitivity {:ns-per-byte 0.0} b s))
+                   with-effect (fn [effect] (mapv :pattern (filter #(= effect (:effect %)) rows)))
+                   compared (bench/verdict (:objective current) b s)]
+               (assoc c
+                      :cost (:cost s) :bytes (:bytes s) :patterns (pattern-ns s)
+                      :faster (with-effect :better) :slower (with-effect :worse)
+                      :gain (:gain compared)
+                      :verdict (:verdict compared))))
+           candidates summaries)]))
+
+(defn- split-candidates
+  "For every timed neighbor that is faster on one pattern and slower on another: the plan that
+  keeps the orders of both and serves each pattern from the faster one. A change of format takes
+  the old layout away, so this plan is two moves from the current one and no neighbor."
+  [current scored]
+  (let [taken (into #{(plan/plan-hash current)} (map :hash) scored)]
+    (->> scored
+         (keep (fn [{:keys [hash faster slower] neighbor :plan}]
+                 (when (and (seq faster) (seq slower))
+                   (let [both (plan/split current neighbor faster)]
+                     {:move {:op :split :with hash :serves faster}
+                      :why (str "Neighbor " hash " is faster on " (str/join ", " faster) " and slower on "
+                                (str/join ", " slower) ". This plan keeps the orders of both and serves"
+                                " each pattern from the faster one.")
+                      :plan both
+                      :hash (plan/plan-hash both)}))))
+         (reduce (fn [[seen out] c]
+                   (if (seen (:hash c)) [seen out] [(conj seen (:hash c)) (conj out c)]))
+                 [taken []])
+         second
+         (mapv #(assoc % :gate-ok (:ok (gate/verify (:plan %))))))))
+
 (defn- descend-step
-  "Time every candidate with the current plan, then measure the cheapest again on its own. The
-  second measurement removes the luck of having picked the minimum of many noisy numbers."
+  "Time every neighbor with the current plan, then the splits that their numbers suggest, then
+  measure the better candidate with the largest gain again on its own. The last measurement removes
+  the luck of having picked the best of many noisy numbers. The numbers of two runs do not compare:
+  two runs in one JVM can time the same layout far apart. So when there are splits, one more run
+  times the plan, the neighbors and the splits together, and the step reports that run alone."
   [plan-path current opts]
-  (let [candidates (step-candidates current)
-        timed (filterv :gate-ok candidates)
-        [base & summaries] (when (seq timed) (bench/measure (into [current] (map :plan timed)) opts))
-        scored (mapv (fn [c s] (assoc c :cost (:cost s) :bytes (:bytes s) :patterns (pattern-ns s)
-                                      :verdict (:verdict (bench/verdict (:objective current) (or (:batch-baseline s) base) s))))
-                     timed summaries)
-        best (first (sort-by :cost (filter #(= :better (:verdict %)) scored)))
+  (let [neighbors (step-candidates current)
+        [base timed] (score current (filterv :gate-ok neighbors) opts)
+        splits (split-candidates current timed)
+        [base scored] (if-let [timed-splits (seq (filter :gate-ok splits))]
+                        (score current (into timed timed-splits) opts)
+                        [base timed])
+        candidates (into neighbors splits)
+        best (first (sort-by #(- (double (:gain %))) (filter #(= :better (:verdict %)) scored)))
         confirmed (when best (compare-plans current (:plan best) opts))]
     (when confirmed
       (journal-evaluation! plan-path current (:plan best) confirmed opts))
@@ -489,7 +583,7 @@
      :cost (:cost base)
      :bytes (:bytes base)
      :patterns (some-> base pattern-ns)
-     :candidates (into (mapv #(select-keys % [:hash :move :cost :bytes :verdict :patterns]) scored)
+     :candidates (into (mapv #(select-keys % [:hash :move :cost :bytes :gain :verdict :patterns]) scored)
                        (map #(assoc (select-keys % [:hash :move]) :verdict :gate-failed))
                        (remove :gate-ok candidates))
      :chosen (when (= :better (:verdict confirmed))
@@ -501,8 +595,22 @@
                 :measured (select-keys confirmed [:sensitivity :baseline :candidate])
                 :plan (:plan best)})
      :stopped (cond
-                (nil? best) "No neighbor is better."
-                (not= :better (:verdict confirmed)) "The best neighbor was not better when measured again.")}))
+                (nil? best) "No candidate is better."
+                (not= :better (:verdict confirmed)) "The best candidate was not better when measured again.")}))
+
+(defn- reach
+  "What a walk timed, and what it cannot reach. A result holds inside this reach only."
+  [steps]
+  (let [candidates (mapcat :candidates steps)
+        failed? #(= :gate-failed (:verdict %))]
+    (array-map
+     :timed (count (distinct (map :hash (remove failed? candidates))))
+     :gate-failed (count (distinct (map :hash (filter failed? candidates))))
+     :moves (mapv (fn [[op n]] {:op op :candidates n})
+                  (sort-by (comp str key) (frequencies (map (comp :op :move) candidates))))
+     :not-tried ["A plan two or more moves from the plan of a step. The one exception is a split."
+                 "An added order that fixes no longer prefix for any pattern."
+                 "The plans behind a better candidate that did not have the largest gain of its step."])))
 
 (defmethod command "descend" [_ {:keys [flags] :as args}]
   (let [path (one-path "descend" args)
@@ -548,12 +656,15 @@
                    (or (some-> overall (select-keys [:sensitivity :baseline :candidate]))
                        (:measured (:chosen (first (filter :chosen steps))))))
        :steps steps
+       ;; For example :memory-not-priced: under such an objective a split, which adds an order, costs nothing.
+       :warnings (plan/warnings final)
+       :reach (reach steps)
        :stopped (or (:stopped (last steps)) "The step limit was reached.")
        :candidate out
        :journal (journal-path path)
        :next (if (= :better verdict)
                (str "accept " out " --into " path)
-               "Keep the plan. A hand-written candidate may still be better: neighbors are one decision away only.")))))
+               "Keep the plan. `reach` says how far the search looked; a hand-written candidate outside it may still be better.")))))
 
 (defn- latest-measurement [records target from to]
   (last (filter #(and (= :evaluate (:op %))
@@ -681,6 +792,44 @@
   [& parts]
   (apply array-map (mapcat identity (apply concat parts))))
 
+(defn- inside?
+  "True when the file is the directory or is below it, under any name of the directory. A
+  directory that does not exist yet has no other name in the file system, so letter case is
+  ignored: that refuses too much on a file system that keeps case apart, and never too little."
+  [file dir]
+  (let [dir-name ^String (canonical dir)]
+    (->> (iterate (fn [^String p] (when p (.getParent (io/file p)))) (canonical file))
+         (take-while some?)
+         (some (fn [^String p] (or (same-file? p dir) (.equalsIgnoreCase p dir-name)))))))
+
+(defn- save-target!
+  "The absolute file of --save, or nil. Stops before the command runs when that file is one that
+  the command reads or writes: a plan, its journal, its lock or its emitted file, a source file
+  below a directory that the command analyzes, or any file below a directory where the command
+  writes candidates. The names of those candidates are not known before the command runs."
+  [{:keys [positional flags]}]
+  (when-let [save (:save flags)]
+    (let [named (concat positional (keep flags [:against :into :out :source]))
+          directory? #(.isDirectory (io/file ^String %))
+          written (concat (keep flags [:out-dir])
+                          (map #(beside % "candidates")
+                               (remove directory? (concat positional (keep flags [:against :into])))))]
+      (when (directory? save)
+        (fail :usage (str "--save needs a file, not a directory: " save)))
+      (when (and (re-find #"(?i)\.clj[cs]?$" save) (some #(inside? save %) (filter directory? positional)))
+        (fail :path-collision (str "--save names a source file below a directory that the command reads: " save)))
+      ;; Both ways: the file may also not be a name that the command needs as a directory.
+      (when-let [dir (first (filter #(or (inside? save %) (inside? % save)) written))]
+        (fail :path-collision (str "--save is, or is below, a directory where the command writes candidates: " dir)))
+      (separate! save
+                 (concat named
+                         (mapcat (fn [path]
+                                   (concat (rest (plan-files path))
+                                           (when-let [plan (try (plan/read-plan path) (catch Exception _ nil))]
+                                             (some-> (emit-target path plan nil) vector))))
+                                 named)))
+      (absolute save))))
+
 (defn run
   "Run one command line. Returns {:exit n :answer map}; the answer is what -main prints as JSON."
   [args]
@@ -690,8 +839,14 @@
         (fail :usage "No command."))
       (when-not (contains? flags-of name)
         (fail :usage (str "Unknown command " (pr-str name) ".")))
-      {:exit 0
-       :answer (jsonable (in-order [[:ok true] [:command name]] (command name (parse-args name more))))})
+      (let [parsed (parse-args name more)
+            save (save-target! parsed)
+            answer (jsonable (in-order [[:ok true] [:command name]]
+                                       (command name parsed)
+                                       (when save [[:saved save]])))]
+        (when save
+          (plan/write-text! save (str (json/write-str answer :escape-slash false) "\n")))
+        {:exit 0 :answer answer}))
     (catch clojure.lang.ExceptionInfo e
       (let [{:keys [code extra problems]} (ex-data e)
             code (or code :internal)]

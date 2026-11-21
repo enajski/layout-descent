@@ -34,8 +34,12 @@ format, the commands and the rules of the search.
 - `plan/plan-hash` is written into journals. `plan_test.clj` pins the hash of the example: change
   it only when the layout format changes on purpose.
 - `accept` is the only writer of an accepted plan and of its emitted file. `neighbors`, `descend`
-  and `evaluate` write candidates and journal lines only. `measure`, `journal` and `status` write
-  nothing.
+  and `evaluate` write candidates and journal lines only. `measure`, `journal`, `status` and
+  `report` write nothing. `--save` writes one more file with any command, and never a plan,
+  a journal, an emitted file, a source file that the command reads, or a file below `candidates/`
+  or `--out-dir`.
+- A candidate that `descend` builds from measurements, such as a split, comes from a pure function
+  in `plan` that a test can call without a timing.
 - A new optional plan key is absent from the normal form when the plan does not give it, so the
   hashes of existing plans and their journals stay valid.
 - stdout of the command line holds one JSON document. Keys are snake_case. A map keyed by pattern

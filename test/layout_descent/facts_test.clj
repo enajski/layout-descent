@@ -1,5 +1,6 @@
 (ns layout-descent.facts-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [layout-descent.facts :as facts]))
 
 (def ^:private found (facts/analyze ["test/fixtures/sample/src"]))
@@ -154,3 +155,86 @@
     (is (every? #(pos? (long (:site-count %))) (:shapes summary)))
     (is (= 1 (:dynamic-count summary)))
     (is (= [] (:dynamic summary)))))
+
+(def ^:private grid (facts/analyze ["test/fixtures/sample/cljs"]))
+
+(defn- grid-sites [function]
+  (mapv (juxt :kind :path :shape :keyed)
+        (filter #(= (str "sample.grid/" function) (:in %)) (:sites grid))))
+
+(deftest a-vector-key-is-one-level
+  (testing "each computed part is a computed key of that level"
+    (is (= [[:read [":world" "[?x ?y]"] [":world" "[? ?]"] 2]] (grid-sites "tile")))
+    (is (= [[:write [":world" "[?x ?y]"] [":world" "[? ?]"] 2]] (grid-sites "place!")))
+    (is (= [[:read [":world" "[?x ?y]" ":tile/seen?"] [":world" "[? ?]" ":tile/seen?"] 2]]
+           (grid-sites "seen?")))
+    (is (= [[:read ["[? ?y]"] ["[? ?]"] 2]] (grid-sites "kind"))))
+  (testing "a constant part stays a constant"
+    (is (= [[:read ["[?x :ground]"] ["[? :ground]"] 1]] (grid-sites "ground"))))
+  (testing "constants only, a symbol that holds the vector and one part stay one computed key"
+    (is (= [[:read [":tiles" "?"] [":tiles" "?"] 1]] (grid-sites "origin")))
+    (is (= [[:read [":tiles" "?position"] [":tiles" "?"] 1]] (grid-sites "held")))
+    (is (= [[:read [":tiles" "?"] [":tiles" "?"] 1]] (grid-sites "single"))))
+  (testing "the depth of a shape counts each computed part"
+    (is (= [[[":world" "[? ?]"] 2 1 0 0 1]
+            [[":world" "[? ?]" ":tile/seen?"] 2 1 0 0 1]
+            [["[? ?]"] 2 1 0 0 1]]
+           (shown (facts/summarize grid 0))))
+    (is (= {:shapes 2 :sites 5 :writes 1} (:hidden (facts/summarize grid 0))))
+    (is (= [[[":tiles" "?"] 1 3 0 0 3] [["[? :ground]"] 1 1 0 0 1]]
+           (drop 3 (shown (facts/summarize grid 0 {:min-depth 1})))))))
+
+(deftest sources-count-the-files-by-extension
+  (is (= {:clj 1 :cljc 0 :cljs 0} (:sources found) (:sources (facts/summarize found 0))))
+  (testing "a file with no access counts as a source, not as a file with sites"
+    (is (= {:clj 0 :cljc 0 :cljs 2} (:sources grid)))
+    (is (= 1 (:files grid))))
+  (testing "a .cljc file counts one time"
+    (let [shared (facts/analyze ["test/fixtures/sample/cljc"])]
+      (is (= {:clj 0 :cljc 1 :cljs 0} (:sources shared)))
+      (is (= 1 (:files shared) (count (:sites shared))))
+      (is (= [] (:warnings (facts/summarize shared 0))))))
+  (testing "the counts of several paths add up"
+    (let [all (facts/analyze ["test/fixtures/sample/src" "test/fixtures/sample/scans"
+                              "test/fixtures/sample/cljc" "test/fixtures/sample/cljs"])]
+      (is (= {:clj 2 :cljc 1 :cljs 2} (:sources all)))
+      (is (= 4 (:files all))))))
+
+(deftest clojurescript-sources-are-a-warning
+  (is (= [] (:warnings (facts/summarize found 0))))
+  (let [[warning :as warnings] (:warnings (facts/summarize grid 0))]
+    (is (= [:clojurescript-sources] (mapv :code warnings)))
+    (is (= #{:code :message} (set (keys warning))))
+    (is (every? #(str/includes? (:message warning) %)
+                [".clj 0, .cljc 0, .cljs 2" "for the JVM" "JavaScript runtime" "does not load"])))
+  (testing "one .cljs file among others is enough"
+    (let [mixed (facts/summarize (facts/analyze ["test/fixtures/sample/src" "test/fixtures/sample/cljs"]) 0)]
+      (is (= [:clojurescript-sources] (mapv :code (:warnings mixed))))
+      (is (str/includes? (:message (first (:warnings mixed))) ".clj 1, .cljc 0, .cljs 2")))))
+
+(deftest a-hint-says-when-every-shape-is-hidden
+  (testing "no hint while a shape is shown"
+    (is (not (contains? (facts/summarize found 0) :hint)))
+    (is (not (contains? (facts/summarize grid 0) :hint))))
+  (testing "no hint when there is no shape at all"
+    (let [none (facts/summarize (assoc found :sites []) 0)]
+      (is (= {:shapes 0 :sites 0 :writes 0} (:hidden none)))
+      (is (not (contains? none :hint)))))
+  (testing "every shape hidden"
+    (let [summary (facts/summarize found 0 {:min-depth 9})]
+      (is (= [] (:shapes summary)))
+      (is (pos? (long (:shapes (:hidden summary)))))
+      (is (every? #(str/includes? (:hint summary) %) ["Every shape is hidden" "min-depth 1" "writes true"]))
+      (is (= (dec (count (:hint summary))) (str/index-of (:hint summary) ".")) "one sentence")))
+  (testing "the hint does not name options that the call has already"
+    (let [constant (assoc (first (:sites found)) :shape [":a" ":b"] :path [":a" ":b"] :keyed 0)
+          summary (facts/summarize (assoc found :sites [constant]) 0 {:min-depth 1 :writes true})]
+      (is (= [] (:shapes summary)))
+      (is (str/includes? (:hint summary) "min-depth 0"))
+      (is (not (str/includes? (:hint summary) "writes true")))
+      (is (= (:hint summary)
+             (:hint (facts/summarize (assoc found :sites [constant]) 0 {:min-depth 1 :writes false})))
+          "no write site is hidden, so writes true would show nothing")
+      (is (= "Every shape is hidden: writes true shows the write sites."
+             (:hint (facts/summarize (assoc found :sites [constant (assoc constant :kind :write :row -1)]) 0
+                                     {:min-depth 1 :writes false})))))))

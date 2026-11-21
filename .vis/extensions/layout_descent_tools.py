@@ -21,32 +21,50 @@ layout-descent ({ROOT}) searches for the data layout that serves the access patt
 map fastest. A plan file (EDN) states the task (:levels, :leaf, :patterns, :workload) and the
 layout decisions (:orders, :serve). The tools are in the `descent` namespace.
 
+To trace information rather than choose a layout, use `descent.flow(src_dir, operation)`. Its steps
+link origins, carriers and uses at source sites. Use the original .cljs sources; `lang="cljs"` selects
+that side of shared .cljc files. Boundaries are unknown, and static counts are not heat.
+
 The loop:
 1. `descent.facts([src_dir])`: the path shapes of the code. `?` is a :key level, `*` a :scan level.
-   `hidden` counts the shallow shapes and the write sites that the answer leaves out.
+   `[? ?]` is one key that is a vector of computed parts: model each part as a level.
+   `hidden` counts the shallow shapes and the write sites that the answer leaves out; follow `hint`.
 2. Write a plan with one order. `{ROOT}/examples/risk/plan.edn` is a model; `{ROOT}/README.md` has the keys.
    Put the grounding of the plan in :notes: `accept` keeps :notes and drops comments.
 3. `descent.check(plan)`, then `descent.verify(plan)`.
-4. `descent.descend(plan)` walks the neighbors. For other candidates use
+4. `descent.descend(plan)` walks the neighbors, and the splits that their numbers suggest. Its
+   `reach` says how many candidates it timed and what it does not try. For other candidates use
    `descent.neighbors(plan, out_dir)`, or write one. A candidate keeps the task and changes only
    :orders and :serve.
 5. `descent.evaluate(candidate, against=plan)`. The verdict is `better`, `worse` or `no-change`.
 6. `descent.accept(candidate, into=plan)` only after a `better` verdict.
 
 For a report: `descent.descend` gives the cost, the bytes and the ns of each pattern for every step
-and writes each chosen plan. `descent.measure([plan, ...])` times plans in one run and writes no
-journal record. `descent.journal(plan)` gives every record.
+and writes each chosen plan; `save=file` keeps the whole answer as JSON. `descent.measure([plan, ...])`
+times plans in one run and writes no journal record. `descent.report(plan)` gives the plan, its
+workload, its text, the emitted source, every journal record and the kept candidates in one answer.
 
 Rules:
 - `accept` is the only writer of an accepted plan and of its emitted file. Do not edit either.
 - Do not change :workload or :objective to make a candidate win. They are the user's statement of
   the task: ask the user.
 - Call these tools, not the command line in a shell. Each call starts a JVM: seconds for most,
-  under a minute for `descend` on 25,000 entries. The tool waits up to 30 minutes.
+  about a minute for `descend` on 25,000 entries. The tool waits up to 30 minutes. To keep an answer
+  as a file, pass `save`; do not redirect a shell command.
+- Read a plan and its journal with `descent.status`, `descent.report` and `descent.journal`. Do not
+  parse the EDN files.
 - A `no-change` verdict supports no claim of direction. Do not say which of the two plans is faster.
 - Report the numbers of one run: one `descend`, `evaluate` or `measure` answer for each table.
+- Two runs can time one layout much further apart than the noise of one run: a gain of 0.15 has
+  changed sign between runs. For a gain of that size, run `descent.evaluate` again before you
+  report a direction, and report `no-change` when the runs disagree.
 - When `sensitivity.depends_on_weights` is true, other :weights can reverse the verdict. Say so,
-  with the smallest `flip_factor`.
+  with the smallest `flip_factor`. When the :weights are your estimate, give the range of the
+  estimate and say whether a flip point (weight times `flip_factor`) is inside it.
+- Do not call a result an optimum. Say how many candidates were timed (`reach.timed`); the result
+  holds inside that reach.
+- A `clojurescript-sources` warning of `facts` means that some of the code is ClojureScript.
+  Say that the timings are JVM timings and that the emitted namespace does not load in JavaScript.
 - Say what the plan models when that is not the code the user named. Compare the result with the
   strongest layout that exists already, not only with the starting plan.
 - An answer with `ok` false has `error.code` and `error.hint`. Follow the hint.
@@ -120,7 +138,18 @@ def _summaries(command: str, result: dict[str, Any]) -> tuple[str, str, tuple[An
             "Access facts",
             f"{result['site_count']} sites in {result['files']} files, {len(shapes)} path shapes shown, "
             f"{hidden.get('shapes', 0)} hidden",
-            (vis.ActivityTable(["Shape", "Reads", "Writes", "Scans"], rows),) if rows else (),
+            (
+                *((vis.ActivityTable(["Shape", "Reads", "Writes", "Scans"], rows),) if rows else ()),
+                *(vis.ActivityText(w["message"]) for w in result.get("warnings") or ()),
+                *((vis.ActivityText(result["hint"]),) if result.get("hint") else ()),
+            ),
+        )
+    if command == "flow":
+        return (
+            f"Information flow: {result['operation']}",
+            f"{len(result['steps'])} static steps, {len(result['boundaries'])} unresolved boundaries"
+            + (" (truncated)" if result["truncated"] else ""),
+            (),
         )
     if command == "check":
         return ("Plan is valid", f"Plan {result['hash']}, {len(result['warnings'])} warnings", ())
@@ -133,6 +162,12 @@ def _summaries(command: str, result: dict[str, Any]) -> tuple[str, str, tuple[An
             f"Plan {result['name']} {result['hash']}",
             f"{len(result['orders'])} orders, emitted file {result['emitted']['state']}",
             (vis.ActivityTable(["Pattern", "Order", "Indexed", "Call"], rows),),
+        )
+    if command == "report":
+        return (
+            f"Report data of plan {result['hash']}",
+            f"{result['journal']['records']} journal records, {len(result['candidates'])} kept candidates",
+            (),
         )
     if command == "journal":
         return ("Journal", f"{len(result['entries'])} of {result['records']} records", ())
@@ -169,7 +204,8 @@ def _summaries(command: str, result: dict[str, Any]) -> tuple[str, str, tuple[An
         rows = [[c["hash"], c["move"]["op"], _percent(c["gain"]), f"{c['cost']:.1f}", c["why"]] for c in taken]
         return (
             f"Descent is {result['verdict']}",
-            f"{len(taken)} steps from {result['start']} to {result['final']}. {result['stopped']}",
+            f"{len(taken)} steps from {result['start']} to {result['final']}, "
+            f"{result['reach']['timed']} candidates timed. {result['stopped']}",
             (vis.ActivityTable(["Hash", "Move", "Gain", "Cost", "Why"], rows),) if rows else (),
         )
     if command == "accept":
@@ -211,6 +247,11 @@ def _activity(command: str, label: str, slow: bool = False, checks: bool = False
 # ---- tools -------------------------------------------------------------------
 
 PlanPath = Annotated[str, "Path of a plan file (EDN)"]
+SavePath = Annotated[str | None, "File that also receives the answer as JSON; not a file of the plan"]
+
+
+def _save(save: str | None) -> list[str]:
+    return _flags(save=_path(save) if save else None)
 
 
 class Descent:
@@ -227,15 +268,30 @@ class Descent:
         """Report where a code base reads and scans nested maps, grouped by path shape.
 
         In a shape, `?` is a key that the code computes (a :key level), `*` a scan of every key
-        (a :scan level) and anything else a constant. A lookup inside the function of a scan
+        (a :scan level) and anything else a constant. `[? ?]` is one key that is a vector of
+        computed parts; each part counts as a level. A lookup inside the function of a scan
         continues the shape of the scan. File names are relative to `root`. `hidden` counts what
-        `min_depth` and `writes` leave out. Nothing is changed.
+        `min_depth` and `writes` leave out, and `hint` says what to change when nothing is shown.
+        `warnings` has `clojurescript-sources` when some of the code is ClojureScript; plans are
+        measured on the JVM. Nothing is changed.
         """
         return run_cli(
             "facts",
             *[_path(p) for p in paths],
             *_flags(limit=limit, min_depth=min_depth, writes="true" if writes else None),
         )
+
+    @vis.method(tag="observation", activity=_activity("flow", "Trace information flow"))
+    def flow(
+        self,
+        src_dir: Annotated[str, "Source directory (.clj, .cljs or .cljc)"],
+        operation: Annotated[str, "Qualified entry function, e.g. orders/settle"],
+        save: SavePath = None,
+        lang: Annotated[str | None, "Source platform: clj or cljs. Default: infer from the entry."] = None,
+    ) -> dict[str, Any]:
+        """Follow the fields one operation produces, carries and consumes. Steps link to source;
+        field uses refer to step ids. Boundaries are unresolved; nothing measures runtime heat."""
+        return run_cli("flow", _path(src_dir), *_flags(operation=operation, lang=lang), *_save(save))
 
     @vis.method(tag="observation", activity=_activity("check", "Check plan"))
     def check(self, plan: PlanPath) -> dict[str, Any]:
@@ -244,24 +300,35 @@ class Descent:
 
     @vis.method(tag="observation", activity=_activity("status", "Read plan status"))
     def status(self, plan: PlanPath) -> dict[str, Any]:
-        """Describe a plan: the order that serves each pattern, how to call each emitted function,
-        the state of the emitted file and the last journal records.
+        """Describe a plan: its workload, the order that serves each pattern (with its weight), how
+        to call each emitted function, the state of the emitted file and the last journal records.
 
         A stale emitted file has `emitted.cause` (`plan-changed`, `plan-renamed`, `file-edited`,
         `emitter-changed`, or `file-or-emitter-changed` for a journal of an older version) and
         `emitted.fix`. Follow the fix: for `plan-changed` it is not `accept`."""
         return run_cli("status", _path(plan))
 
+    @vis.method(tag="observation", activity=_activity("report", "Read report data"))
+    def report(self, plan: PlanPath, save: SavePath = None) -> dict[str, Any]:
+        """Return everything a report needs in one answer, so that no plan or journal file is parsed.
+
+        The fields of `status`, then `plan_text` (the plan file), `source` (what `emit` would write),
+        `journal.entries` (every record) and `candidates` (the plans kept under `candidates/`, with
+        hash, path, orders and serve). Numbers of two journal records come from two runs.
+        """
+        return run_cli("report", _path(plan), *_save(save))
+
     @vis.method(tag="observation", activity=_activity("journal", "Read journal"))
     def journal(
         self,
         plan: PlanPath,
         last: Annotated[int | None, "Only the newest records; the default is all"] = None,
+        save: SavePath = None,
     ) -> dict[str, Any]:
         """Return the journal of a plan as `entries`: every evaluation with its verdict, costs, bytes
         and the ns of each pattern, and every acceptance. `unreadable_lines` counts lines that are
         no record."""
-        return run_cli("journal", _path(plan), *_flags(last=last))
+        return run_cli("journal", _path(plan), *_flags(last=last), *_save(save))
 
     @vis.method(tag="observation", activity=_activity("measure", "Measure plans", slow=True))
     def measure(
@@ -269,13 +336,14 @@ class Descent:
         plans: Annotated[list[str], "Plan files of one task; one is enough"],
         rounds: Annotated[int | None, "Timed rounds for each pattern; the default is 15"] = None,
         warm_ms: Annotated[int | None, "Warm-up for each pattern in milliseconds; the default is 150"] = None,
+        save: SavePath = None,
     ) -> dict[str, Any]:
         """Gate plans of one task and time them on the same data, with no verdict and no journal record.
 
         Each plan gets its cost, estimated bytes, build time and the ns of each pattern. The
         numbers compare inside one call only. Use it for the table of a report; `evaluate` decides.
         """
-        return run_cli("measure", *[_path(p) for p in plans], *_flags(rounds=rounds, warm_ms=warm_ms))
+        return run_cli("measure", *[_path(p) for p in plans], *_flags(rounds=rounds, warm_ms=warm_ms), *_save(save))
 
     @vis.method(tag="verification", activity=_activity("verify", "Run the gate", slow=True, checks=True))
     def verify(
@@ -312,6 +380,7 @@ class Descent:
         against: Annotated[str, "Path of the plan that the candidate would replace"],
         rounds: Annotated[int | None, "Timed rounds for each pattern; the default is 15"] = None,
         warm_ms: Annotated[int | None, "Warm-up for each pattern in milliseconds; the default is 150"] = None,
+        save: SavePath = None,
     ) -> dict[str, Any]:
         """Gate both plans, time them on the same data and return the verdict.
 
@@ -321,7 +390,12 @@ class Descent:
         The measurement is appended to `<against>.journal`, where `accept` looks for it.
         """
         return run_cli(
-            "evaluate", _path(candidate), "--against", _path(against), *_flags(rounds=rounds, warm_ms=warm_ms)
+            "evaluate",
+            _path(candidate),
+            "--against",
+            _path(against),
+            *_flags(rounds=rounds, warm_ms=warm_ms),
+            *_save(save),
         )
 
     @vis.method(tag="mutation", activity=_activity("descend", "Search neighbor plans", slow=True))
@@ -332,19 +406,27 @@ class Descent:
         out: Annotated[str | None, "File that receives the final candidate"] = None,
         rounds: Annotated[int | None, "Timed rounds for each pattern"] = None,
         warm_ms: Annotated[int | None, "Warm-up for each pattern in milliseconds"] = None,
+        save: SavePath = None,
     ) -> dict[str, Any]:
-        """Take the best measured neighbor move, again and again, until none is better.
+        """Take the best measured candidate of each step, again and again, until none is better.
 
         The plan file is not changed. The result names a `candidate` file to pass to `accept`.
         Each step has the cost, the bytes and the ns of each pattern for the plan and every
-        neighbor; a chosen plan is written under `candidates/` beside the plan and named in
-        `chosen.path`. `measured` compares the start and the final plan in one run. This is the
-        mechanical baseline of the search: a candidate that needs two decisions at once is not found.
+        candidate; a chosen plan is written under `candidates/` beside the plan and named in
+        `chosen.path`. `measured` compares the start and the final plan in one run.
+
+        The candidates of a step are its neighbors, one move away. When a neighbor is faster on
+        one pattern and slower on another, the step also times a `split`: the plan that keeps the
+        orders of both and serves each pattern from the faster one. `reach` counts the candidates
+        timed and lists what the search does not try. A result holds inside that reach only.
+        `warnings` are those of the final plan. With `memory-not-priced` an added order costs
+        nothing under the objective: give the bytes of the final plan beside its cost.
         """
         return run_cli(
             "descend",
             _path(plan),
             *_flags(max_steps=max_steps, out=_path(out) if out else None, rounds=rounds, warm_ms=warm_ms),
+            *_save(save),
         )
 
     @vis.method(tag="mutation", activity=_activity("accept", "Accept candidate"))

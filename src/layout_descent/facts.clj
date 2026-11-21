@@ -76,12 +76,25 @@
       (run! #(visit nil %) forms))
     {:calls @calls :arguments @arguments :readers @readers}))
 
-(defn- element [form]
+(defn- part
+  "One key form as {:text :shape :keyed}: a constant, or a key that the code computes."
+  [form]
   (cond
-    (symbol? form) {:kind :key :text (str "?" form)}
+    (symbol? form) {:text (str "?" form) :shape "?" :keyed 1}
     (or (keyword? form) (string? form) (number? form) (boolean? form) (nil? form))
-    {:kind :const :text (pr-str form)}
-    :else {:kind :key :text "?"}))
+    {:text (pr-str form) :shape (pr-str form) :keyed 0}
+    :else {:text "?" :shape "?" :keyed 1}))
+
+(defn- element
+  "One level of a path as {:text :shape :keyed}. A vector literal of two or more parts, of which
+  the code computes at least one, is a composite key: one level, written [? :a], that counts one
+  computed level for each computed part."
+  [form]
+  (let [parts (when (and (vector? form) (<= 2 (count form))) (mapv part form))
+        join #(str "[" (str/join " " (map % parts)) "]")]
+    (if (some (comp pos? :keyed) parts)
+      {:text (join :text) :shape (join :shape) :keyed (reduce + (map :keyed parts))}
+      (part form))))
 
 (defn- chain
   "Follow nested literal accesses outwards: (get (get-in db [:a k]) j) is db at [:a ?k ?j].
@@ -133,7 +146,7 @@
                 path [(let [form (arg path)] (when (vector? form) (mapv element form)))]
                 key-step (map (comp vector element) (take-nth key-step (drop key args)))
                 key [[(element (arg key))]]
-                :else [[{:kind :scan :text "*"}]])]
+                :else [[{:text "*" :shape "*" :keyed 0}]])]
     (for [own paths
           :let [full (into (:path below) own)]]
       {:kind kind
@@ -142,8 +155,8 @@
        :binder binder
        :inner (:inner below)
        :path (when own (mapv :text full))
-       :shape (when own (mapv #(if (= :key (:kind %)) "?" (:text %)) full))
-       :keyed (count (filter #(= :key (:kind %)) full))})))
+       :shape (when own (mapv :shape full))
+       :keyed (reduce + (map :keyed full))})))
 
 (defn- usage-sites [{:keys [calls arguments]} resolved {:keys [row col arity name]}]
   (let [pos [row col]
@@ -241,12 +254,20 @@
 (defn- relative [^Path root filename]
   (str (.relativize root (.normalize (.toAbsolutePath (.toPath (io/file (str filename))))))))
 
+(defn- extension [filename]
+  (let [file (.getName (io/file (str filename)))
+        dot (.lastIndexOf file ".")]
+    (if (pos? dot) (keyword (subs file (inc dot))) :other)))
+
 (defn analyze
-  "Every access fact under the given source paths. Returns {:root dir :files n :unparsed [files]
-  :sites [...]}; a site has :file :row :col :fn :in :kind :target :path :shape :keyed and maybe
-  :via. :root is the longest common directory of the paths, and each file name is relative to it.
-  A nil :path means the path is not a literal. Accesses of one constant key are left out. A scan
-  whose literal function reads the scanned value is one site: its path goes on into that read."
+  "Every access fact under the given source paths. Returns {:root dir :files n :sources {ext n}
+  :unparsed [files] :sites [...]}; a site has :file :row :col :fn :in :kind :target :path :shape
+  :keyed and maybe :via. :root is the longest common directory of the paths, and each file name
+  is relative to it. :files counts the files that hold an access, and :sources counts every
+  file that was read, by extension. A nil :path means the path is not a literal. Accesses of one constant key
+  are left out. A scan whose literal function reads the scanned value is one site: its path goes
+  on into that read. :keyed counts the keys that the code computes: each computed part of a
+  vector key is one."
   [paths]
   (let [root (common-root paths)
         analysis (:analysis (kondo/run! {:lint (mapv str paths)
@@ -296,6 +317,8 @@
         absorbed (set (for [s sites, [row col] (:inner s)] [(:file s) row col]))]
     {:root (str root)
      :files (count indexes)
+     :sources (into (sorted-map :clj 0 :cljc 0 :cljs 0)
+                    (frequencies (map extension (distinct (mapcat #(map :filename %) (vals analysis))))))
      :unparsed (vec (sort (keep (fn [[f index]] (when (nil? index) (relative root f))) indexes)))
      :sites (->> sites
                  (remove #(absorbed [(:file %) (:row %) (:col %)]))
@@ -308,15 +331,38 @@
   {:min-depth 2 :writes false})
 
 (defn- depth
-  "The number of levels that a shape computes or scans: its ? and * elements."
-  [shape]
-  (count (filter #{"?" "*"} shape)))
+  "The number of levels that a site computes or scans: its computed keys, each computed part of
+  a vector key among them, and its * elements."
+  [{:keys [shape keyed]}]
+  (+ (long keyed) (count (filter #{"*"} shape))))
+
+(defn- source-warnings [sources]
+  (if (pos? (long (:cljs sources 0)))
+    [{:code :clojurescript-sources
+      :message (str "The analyzed files include ClojureScript ("
+                    (str/join ", " (map (fn [[ext n]] (str "." (name ext) " " n)) sources))
+                    "). Plans are measured and emitted for the JVM, so the timings do not"
+                    " transfer to a JavaScript runtime and the emitted namespace does not load"
+                    " there.")}]
+    []))
+
+(defn- all-hidden-hint
+  "Names only the options that can show something: a lower min-depth when the call asks for more
+  than one computed level, and writes when write sites are hidden. Nil when neither can."
+  [min-depth hidden-writes]
+  (when-let [parts (seq (remove nil? [(when (< 1 (long min-depth)) "min-depth 1 shows the shapes of one computed level")
+                                      (when (pos? (long hidden-writes)) "writes true shows the write sites")]))]
+    (str "Every shape is hidden: " (str/join ", and " parts) ".")))
+
+(def ^:private constant-only-hint
+  (str "Every shape has constant keys only, so the code computes no level to model: min-depth 0"
+       " lists these shapes."))
 
 (defn- shape-group [limit [shape found]]
   (let [kinds (frequencies (map :kind found))]
     (array-map
      :shape shape
-     :depth (depth shape)
+     :depth (depth (first found))
      :keyed (:keyed (first found))
      :reads (get kinds :read 0)
      :writes (get kinds :write 0)
@@ -327,30 +373,38 @@
 
 (defn summarize
   "Group sites by path shape, the most keyed shapes first. In a shape, ? is a key the code
-  computes, * a scan of every key, and anything else a constant. Each group lists at most limit
-  sites; limit 0 gives the counts only. opts {:min-depth n :writes bool} choose what is shown: a
-  shape needs n or more ? and * elements, and a write site shows only when :writes is true.
-  :hidden counts what is left out: whole shapes, all their sites and the hidden writes together,
-  and the hidden writes alone. :site-count counts every site, shown or not."
+  computes, * a scan of every key, [? :a] one level whose key is a vector, and anything else a
+  constant. Each group lists at most limit sites; limit 0 gives the counts only. opts {:min-depth
+  n :writes bool} choose what is shown: a shape needs n or more ? and * elements, where each ?
+  in a vector key counts, and a write site shows only when :writes is true. :hidden counts what
+  is left out: whole shapes, all their sites and the hidden writes together, and the hidden
+  writes alone. :site-count counts every site, shown or not. :warnings is a vector of {:code
+  :message}; :hint is present only when shapes exist and none is shown."
   ([analysis limit] (summarize analysis limit summary-defaults))
-  ([{:keys [root files unparsed sites]} limit opts]
+  ([{:keys [root files sources unparsed sites]} limit opts]
    (let [{:keys [min-depth writes]} (merge summary-defaults opts)
          kept (if writes sites (remove #(= :write (:kind %)) sites))
          dynamic (filterv #(nil? (:shape %)) kept)
          groups (->> (remove #(nil? (:shape %)) kept)
                      (group-by :shape)
-                     (filter #(<= (long min-depth) (long (depth (key %)))))
+                     (filter #(<= (long min-depth) (long (depth (first (val %))))))
                      (map #(shape-group limit %))
                      (sort-by (juxt #(- (long (:keyed %))) #(- (long (:site-count %))) #(str/join " " (:shape %))))
-                     vec)]
-     (array-map
-      :root root
-      :files files
-      :unparsed unparsed
-      :site-count (count sites)
-      :shapes groups
-      :hidden {:shapes (- (count (distinct (keep :shape sites))) (count groups))
-               :sites (- (count sites) (count dynamic) (long (reduce + (map :site-count groups))))
-               :writes (- (count sites) (count kept))}
-      :dynamic-count (count dynamic)
-      :dynamic (vec (take limit (sort-by (juxt :file :row :col) dynamic)))))))
+                     vec)
+         hidden-shapes (- (count (distinct (keep :shape sites))) (count groups))]
+     (apply array-map
+            (concat
+             [:root root
+              :files files
+              :sources sources
+              :unparsed unparsed
+              :site-count (count sites)
+              :warnings (source-warnings sources)]
+             (when (and (empty? groups) (pos? hidden-shapes))
+               [:hint (or (all-hidden-hint min-depth (- (count sites) (count kept))) constant-only-hint)])
+             [:shapes groups
+              :hidden {:shapes hidden-shapes
+                       :sites (- (count sites) (count dynamic) (long (reduce + (map :site-count groups))))
+                       :writes (- (count sites) (count kept))}
+              :dynamic-count (count dynamic)
+              :dynamic (vec (take limit (sort-by (juxt :file :row :col) dynamic)))])))))
