@@ -185,18 +185,6 @@
             :sites (mapv (fn [[file row col in kind]] {:file file :row row :col col :in in :access kind})
                          (take sites-limit sites))})))
 
-(defn- boundary-rows [boundaries]
-  (->> (group-by first boundaries)
-       (map (fn [[reason sites]]
-              {:reason reason
-               :sites (count sites)
-               :via (->> (frequencies (map second sites))
-                         (sort-by (juxt (comp - val) key))
-                         (take 5)
-                         (mapv (fn [[via n]] {:via via :sites n})))}))
-       (sort-by (juxt (comp - :sites) (comp str :reason)))
-       vec))
-
 (defn- common [xs]
   (ffirst (sort-by (juxt (comp - val) key) (frequencies xs))))
 
@@ -288,8 +276,8 @@
   those records. An entity is a group of records with shared keys (`group`); its :keys count the
   records that have the key and the sites that read and write it, its :levels are the paths that
   end at a scan or at a computed key. A record is the origin of a value at one source site."
-  [dir files lang {:keys [limit entity sites]}]
-  (let [index (flow/index dir files nil lang)
+  [dir files lang {:keys [limit entity sites search max-steps]}]
+  (let [index (assoc (flow/index dir files nil lang) :max-steps max-steps)
         {:keys [entries truncated untraced records links boundaries shapes summaries]} (collect index)
         ordered (vec (sort-by (fn [r] [(kind-rank (:kind r)) (:name r) (str (:file r)) (or (:row r) 0) (or (:col r) 0)])
                               (keys records)))
@@ -303,7 +291,11 @@
                      (map-indexed (fn [i [members row]] [(str "e" (inc (long i))) members row]))
                      vec)
         entity-of (into {} (for [[id members _] grouped r members] [r id]))
-        shown (set (map first (take limit grouped)))
+        visible (take limit (if search
+                              (filter (fn [[_ _ row]] (str/includes? (str/lower-case (:name row))
+                                                                     (str/lower-case search))) grouped)
+                              grouped))
+        shown (set (map first visible))
         loose (remove entity-of ordered)
         chosen (cond (= "loose" entity) loose
                      entity (second (first (filter #(= entity (first %)) grouped))))
@@ -320,11 +312,11 @@
       :truncated truncated
       :untraced untraced
       :note "An entity groups records that share keys; a record is the origin of a value at a source site, not a type. Counts are sites, not executions."
-      :entities (vec (for [[id _ row] (take limit grouped)] (into (array-map :id id) row)))
-      :shape-contrasts (contrasts (take limit grouped) shapes)
+      :entities (vec (for [[id _ row] visible] (into (array-map :id id) row)))
+      :shape-contrasts (contrasts visible shapes)
       :links (filterv #(and (shown (:from %)) (shown (:to %))) (entity-links links entity-of))
-      :hidden {:entities (max 0 (- (count grouped) (long limit))) :loose-records (count loose)}
-      :boundaries (boundary-rows boundaries)}
+      :hidden {:entities (max 0 (- (count grouped) (count visible))) :loose-records (count loose)}
+      :boundaries (flow/boundary-rows boundaries)}
       entity
       (assoc :entity entity
              :records (vec (for [r chosen]

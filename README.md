@@ -198,6 +198,14 @@ the next step. Exit code 2: wrong usage or an internal error.
   the reported write problem and rerun `accept`; it finishes the recorded change before starting
   another. Do not remove the per-plan lock file while a command is running.
 
+## Source scope
+
+`facts`, `flow`, `schema` and `discover` accept repeated `--exclude <glob>` flags (`exclude=[...]`
+in Vis). Globs use Java NIO syntax and match paths relative to each source directory; for example,
+`--exclude 'test/**' --exclude 'apps/**/test/**'`. Explicit file arguments to `facts` are still read.
+`provenance` lists the input paths and, for Git checkouts with a HEAD, the revision and checkout-wide
+`dirty` flag. This is context, not a snapshot or fingerprint of the analyzed bytes.
+
 ## Facts
 
 `facts` uses clj-kondo to find the calls that resolve to the `clojure.core` map functions and
@@ -237,9 +245,15 @@ outward, including calls through namespace aliases. It does not load the applica
 
 ```sh
 clojure -M:cli flow test/fixtures/flow --operation shop.order/settle
+clojure -M:cli flow test/fixtures/flow --operation shop.order/settle --operation shop.order/pipeline
 clojure -M:cli flow test/fixtures/flow --operation board.game/act   # original .cljs sources
 clojure -M:cli flow src --operation layout-descent.bench/center --save /tmp/center.json
 ```
+
+Repeat `--operation` (or pass a list in Vis) to reuse one source index for the whole batch. It
+returns ordered `traces`, each with its own `ok` flag and error if unresolved. A batch uses one
+language; set `--lang` explicitly on mixed trees (default CLJ, or CLJS for a CLJS-only tree).
+A `def` or `defonce` holder is not an entry function; trace a consumer instead.
 
 - **Follow an operation:** `steps` are graph nodes with an `id`, `kind`, `via`, enclosing function
   (`in`), relative `file`, `row` and `col`. `inputs` point to the steps that supply values. A lookup's
@@ -286,6 +300,8 @@ This bounded **static** slice follows:
   `cond`, `case`, `and`, `or` and `try` with its `catch` and `finally`;
 - map access and update functions (including when passed to `swap!`), `merge`, two-argument `into`,
   `dissoc`, `contains?`, and `select-keys` with a literal vector of keys;
+- three-argument `into` with a `map`, `filter`, `remove`, or `keep` transducer, `reduce-kv`
+  with one representative key and value, and selected `clojure.string` functions as consumers;
 - one collection through `map`, `mapv`, `keep`, `mapcat`, `filter`, `filterv`, `remove`, `sort-by`,
   `take-while`, `drop-while`, `some`, `every?`, `not-any?`, `not-every?`, `reduce`, `doseq` and
   `for` (with `:let`, `:when` and `:while`): the function is traced once for an element that
@@ -296,22 +312,24 @@ This bounded **static** slice follows:
 A field first read from input is not proof of its business producer. Dynamic keys, unresolved
 callbacks, JS interop, `loop`/`recur`, `doto`, other unsupported macros, variadic calls, `:or` and
 `& rest` bindings, external calls (including serialization), a caught exception and recursion are
-`boundaries`, not proof that a value is unused. Check `unparsed` and `truncated` (2,048 steps; call depth 32 ends at
-a boundary). Counts are source evidence, **not** hotness, bytes or a license to drop a field. No
+`boundaries`, not proof that a value is unused. `boundaries` summarizes distinct sites by reason and
+callee, as in `schema`; `boundary_steps` holds the exact step IDs. Check `unparsed` and `truncated`.
+`--max-steps` changes the default 2,048-step limit per trace; `cutoff` locates the first omitted step.
+Call depth 32 still ends at a boundary. Counts are source evidence, **not** hotness, bytes or a license to drop a field. No
 plan, accepted layout, journal or source is changed. `--save` optionally writes the graph as JSON.
 
 ## See the data model
 
 `schema` builds a local trace template for each function arity and follows named calls by binding
 these templates to the argument origins. The result for the same arguments can be reused; `summaries`
-counts bodies and cache hits. The 2,048-step limit applies to each local body rather than its entire
+counts bodies and cache hits. `--max-steps` (default 2,048) applies to each local body rather than its entire
 call tree. Per-entry expansion is also bounded (100,000 interpreted steps). Recursion, depth 32,
 and unresolved calls are boundaries. A callback or computed key known only at a call site may
 remain unresolved in a template; use `flow` for a context-sensitive trace. Neither loads the app.
 
 ```sh
 clojure -M:cli schema test/fixtures/flow
-clojure -M:cli schema src --limit 12 --diagram /tmp/model.md   # a Mermaid flowchart
+clojure -M:cli schema src --search profile --limit 12 --diagram /tmp/model.md   # a Mermaid flowchart
 clojure -M:cli schema src --entity e2 --save /tmp/e2.json      # the records of one entity
 ```
 

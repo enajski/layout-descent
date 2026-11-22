@@ -5,6 +5,7 @@
   (:require [clojure.data.json :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.java.shell :as shell]
             [clojure.string :as str]
             [layout-descent.bench :as bench]
             [layout-descent.emit :as emit]
@@ -19,13 +20,13 @@
   "Every command: its usage, what it changes, and what it is for."
   [{:name "help" :usage "help" :writes "nothing"
     :doc "List the commands."}
-   {:name "facts" :usage "facts <src-dir>... [--limit N] [--min-depth N] [--writes true|false]" :writes "nothing"
+   {:name "facts" :usage "facts <src-dir>... [--limit N] [--min-depth N] [--writes true|false] [--exclude <glob>]" :writes "nothing"
     :doc "Where a code base reads and scans nested maps, grouped by path shape. Shapes with fewer than --min-depth (2) computed levels and write sites are counted in `hidden`. --limit 0 gives counts only."}
-   {:name "flow" :usage "flow <src-dir> --operation <namespace/function> [--lang clj|cljs]" :writes "nothing"
+   {:name "flow" :usage "flow <src-dir> --operation <namespace/function> [--operation ...] [--lang clj|cljs] [--max-steps N] [--exclude <glob>]" :writes "nothing"
     :doc "Follow named map fields through one Clojure operation and its resolved callees. Steps, uses and unresolved boundaries are static evidence, not timings."}
-   {:name "discover" :usage "discover <src-dir> [--lang clj|cljs]" :writes "nothing"
+   {:name "discover" :usage "discover <src-dir> [--lang clj|cljs] [--exclude <glob>]" :writes "nothing"
     :doc "Find filtered entry traversals and possible membership-index maintenance sites; hypotheses only."}
-   {:name "schema" :usage "schema <src-dir> [--lang clj|cljs] [--limit N] [--entity <id>|loose] [--sites N] [--diagram <file.md|file.mmd>]"
+   {:name "schema" :usage "schema <src-dir> [--lang clj|cljs] [--limit N] [--entity <id>|loose] [--sites N] [--search <name>] [--max-steps N] [--exclude <glob>] [--diagram <file.md|file.mmd>]"
     :writes "the file of --diagram"
     :doc "The data model of a code base: entities (records that share keys), the fields that one entity carries into another, and where the traces stopped. --entity adds the records of one entity with their paths and sites. --diagram writes a Mermaid flowchart. Static evidence, not timings."}
    {:name "check" :usage "check <plan>" :writes "nothing"
@@ -55,7 +56,7 @@
     :doc "Gate and return source, or write a preview to --out. Only accept writes the configured emitted file."}])
 
 (def ^:private flags-of
-  {"help" #{} "facts" #{:limit :min-depth :writes} "flow" #{:operation :lang} "discover" #{:lang} "schema" #{:lang :limit :entity :sites :diagram} "check" #{} "status" #{} "report" #{} "journal" #{:last}
+  {"help" #{} "facts" #{:limit :min-depth :writes :exclude} "flow" #{:operation :lang :max-steps :exclude} "discover" #{:lang :exclude} "schema" #{:lang :limit :entity :sites :diagram :search :exclude :max-steps} "check" #{} "status" #{} "report" #{} "journal" #{:last}
    "measure" #{:rounds :warm-ms} "verify" #{:source} "neighbors" #{:out-dir}
    "evaluate" #{:against :rounds :warm-ms} "descend" #{:max-steps :out :rounds :warm-ms}
    "accept" #{:into :force} "emit" #{:out}})
@@ -94,7 +95,9 @@
               (fail :usage (str "Unknown flag " arg " for " command ". Allowed: "
                                 (str/join " " (map #(str "--" (name %)) (sort allowed))) "."))
               (empty? more) (fail :usage (str "Flag " arg " needs a value."))
-              :else (recur (rest more) positional (assoc flags flag (first more)))))
+              :else (recur (rest more) positional (if (#{:operation :exclude} flag)
+                                                          (update flags flag (fnil conj []) (first more))
+                                                          (assoc flags flag (first more))))))
           (recur more (conj positional arg) flags))
         {:positional positional :flags flags}))))
 
@@ -335,6 +338,24 @@
           "accept <candidate> --into <plan> when the verdict is better"
           "for a report: descend --save <file>, measure <plan>..., report <plan>"]})
 
+(defn- source-files [dir flags]
+  (try ((requiring-resolve 'layout-descent.flow/source-files) dir (:exclude flags))
+       (catch IllegalArgumentException error
+         (fail :usage (str "Invalid --exclude glob: " (ex-message error))))))
+
+(defn- source-provenance [path]
+  (let [file (.getCanonicalFile (io/file path))
+        dir (if (.isDirectory file) file (.getParentFile file))]
+    (merge {:path (str file)}
+           ;; This describes the checkout, not a content hash or a snapshot of the inputs.
+           (try
+             (let [revision (shell/sh "git" "rev-parse" "--verify" "HEAD" :dir (str dir))]
+               (when (zero? (:exit revision))
+                 (let [status (shell/sh "git" "--no-optional-locks" "-c" "core.fsmonitor=false" "status" "--porcelain" "--untracked-files=normal" :dir (str dir))]
+                   {:revision (str/trim (:out revision))
+                    :dirty (when (zero? (:exit status)) (not (str/blank? (:out status))))})))
+             (catch java.io.IOException _ nil)))))
+
 (defmethod command "facts" [_ {:keys [positional flags]}]
   (when (empty? positional)
     (fail :usage "facts needs at least one source directory."))
@@ -342,7 +363,10 @@
     (fail :usage (str "No such path: " path)))
   (let [analyze (requiring-resolve 'layout-descent.facts/analyze)
         summarize (requiring-resolve 'layout-descent.facts/summarize)]
-    (assoc (summarize (analyze positional)
+    (assoc (summarize (if (seq (:exclude flags))
+                         (analyze positional (distinct (mapcat #(if (.isDirectory (io/file %))
+                                                                   (source-files % flags) [%]) positional)))
+                         (analyze positional))
                       (int-flag flags :limit 5 0)
                       {:min-depth (int-flag flags :min-depth 2 0)
                        :writes (case (:writes flags "false")
@@ -356,15 +380,18 @@
 
 (defmethod command "flow" [_ {:keys [positional flags]}]
   (let [[dir] positional
-        op (:operation flags)
-        lang (some-> (:lang flags) keyword)]
+        operations (:operation flags)
+        lang (some-> (:lang flags) keyword)
+        max-steps (int-flag flags :max-steps 2048 1)]
     (when (and lang (not (#{:clj :cljs} lang))) (fail :usage "--lang must be clj or cljs."))
     (when-not (and (= 1 (count positional)) (.isDirectory (io/file ^String dir))
-                   op (re-matches #"[^/\s]+/[^/\s]+" op))
-      (fail :usage "Usage: flow <src-dir> --operation <namespace/function> [--lang clj|cljs]."))
-    (let [files ((requiring-resolve 'layout-descent.flow/source-files) dir)]
+                   (seq operations) (every? #(re-matches #"[^/\s]+/[^/\s]+" %) operations))
+      (fail :usage "Usage: flow <src-dir> --operation <namespace/function> [--operation ...] [--lang clj|cljs]."))
+    (let [files (source-files dir flags)]
       (separate! (:save flags) files)
-      ((requiring-resolve 'layout-descent.flow/analyze) dir files op lang))))
+      (if (= 1 (count operations))
+        ((requiring-resolve 'layout-descent.flow/analyze) dir files (first operations) lang max-steps)
+        ((requiring-resolve 'layout-descent.flow/analyze-many) dir files operations lang max-steps)))))
 
 (defmethod command "discover" [_ {:keys [positional flags]}]
   (let [[dir] positional
@@ -372,7 +399,7 @@
     (when-not (and (= 1 (count positional)) (.isDirectory (io/file ^String dir))
                    (or (nil? lang) (#{:clj :cljs} lang)))
       (fail :usage "Usage: discover <src-dir> [--lang clj|cljs]."))
-    (let [files ((requiring-resolve 'layout-descent.flow/source-files) dir)]
+    (let [files (source-files dir flags)]
       (separate! (:save flags) files)
       ((requiring-resolve 'layout-descent.discover/analyze) dir files lang))))
 
@@ -387,11 +414,13 @@
       (fail :usage "--diagram needs a .md or a .mmd file."))
     (when (and diagram save (same-file? diagram save))
       (fail :path-collision "--diagram and --save name the same file."))
-    (let [files ((requiring-resolve 'layout-descent.flow/source-files) dir)
+    (let [files (source-files dir flags)
           _ (separate! save files)
           answer ((requiring-resolve 'layout-descent.schema/analyze)
                   dir files lang {:limit (int-flag flags :limit 30 1)
                                   :entity (:entity flags)
+                                   :search (:search flags)
+                                   :max-steps (int-flag flags :max-steps 2048 1)
                                   :sites (int-flag flags :sites 3 0)})]
       (if diagram
         (let [chart ((requiring-resolve 'layout-descent.schema/mermaid) answer)
@@ -893,6 +922,9 @@
             save (save-target! parsed)
             answer (jsonable (in-order [[:ok true] [:command name]]
                                        (command name parsed)
+                                       (when (#{"facts" "flow" "schema" "discover"} name)
+                                         [[:provenance (mapv source-provenance (:positional parsed))]
+                                          [:excludes (get-in parsed [:flags :exclude] [])]])
                                        (when save [[:saved save]])))]
         (when save
           (plan/write-text! save (str (json/write-str answer :escape-slash false) "\n")))

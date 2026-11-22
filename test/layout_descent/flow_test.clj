@@ -32,7 +32,7 @@
     (is (= ["clojure.core/*"] (map (comp :via steps) (:inputs (steps (:at amount))))))
     (is (empty? (uses r ":currency" :consume)))
     (is (empty? (fields r ":inventory-price")))
-    (is (= #{:dynamic-key :indirect-call} (set (map (comp :reason steps) (:boundaries r)))))
+    (is (= #{:dynamic-key :indirect-call} (set (map :reason (:boundaries r)))))
     (is (= ["sink"] (map :via (uses r ":amount" :boundary))))))
 
 (deftest do-not-unify-by-key-or-by-container
@@ -56,7 +56,7 @@
     (is (= ["clojure.core/inc"] (map :via (uses r ":count" :consume))))
     (is (= [:carry :produce] (map #(get-in r [:steps (:at %) :kind]) (fields r ":qty")))))
   (let [r (report "cycle")]
-    (is (= [:recursive-call] (map (comp :reason (:steps r)) (:boundaries r))))))
+    (is (= [:recursive-call] (map :reason (:boundaries r))))))
 
 (deftest cljs-branches-and-movement
   (let [files (flow/source-files root)
@@ -79,7 +79,7 @@
     (is (contains? (paths :produce) [":world" "[? ?]" ":tile/ids"]))
     (is (= ["cljs.core/deref" "cljs.core/swap!"] (map :via (filter #(= :state-read (:kind %)) steps))))
     (is (= ["cljs.core/swap!"] (map :via (filter #(= :state-write (:kind %)) steps))))
-    (is (= #{:external-value :dynamic-key} (set (map (comp :reason steps) (:boundaries r)))))
+    (is (= #{:external-value :dynamic-key} (set (map :reason (:boundaries r)))))
     (testing "select exactly one side of shared code, preserving the old JVM default on mixed trees"
       (doseq [[lang field] [[nil ":desktop"] [:clj ":desktop"] [:cljs ":browser"]]]
         (let [r (flow/analyze root files "board.model/payload" lang)]
@@ -128,7 +128,7 @@
 
 (defn- vias [result key kind] (map :via (uses result key kind)))
 
-(defn- reasons [result] (map (comp :reason (:steps result)) (:boundaries result)))
+(defn- reasons [result] (map :reason (:boundaries result)))
 
 (deftest branches-bind-and-choose
   (let [r (form "guarded")]
@@ -198,3 +198,36 @@
              [":local" :known-slot "desk.forms/scoped-binding"]
              [":root" :known-slot "desk.forms/scoped-binding"]}
            resolved))))
+
+(deftest batch-and-cutoff
+  (let [run (fn [& flags] (:answer (cli/run (into ["flow" root] flags))))
+        batch (run "--operation" "shop.order/settle" "--operation" "missing/entry"
+                   "--operation" "shop.order/pipeline")
+        [settle missing pipeline] (get batch "traces")
+        cut (run "--operation" "shop.order/settle" "--max-steps" "3")]
+    (is (= [true false true] (map #(get % "ok") [settle missing pipeline])))
+    (is (= "flow_operation" (get-in missing ["error" "code"])))
+    (is (= (get settle "steps") (get (run "--operation" "shop.order/settle") "steps")))
+    (is (= #{"dynamic-key" "indirect-call"} (set (map #(get % "reason") (get settle "boundaries")))))
+    (is (= [21 22] (get settle "boundary_steps")))
+    (is (= [true 3] [(get cut "truncated") (count (get cut "steps"))]))
+    (is (string? (get-in cut ["cutoff" "in"])))
+    (is (= "flow_operation" (get-in (run "--operation" "shop.order/settle" "--exclude" "shop/**")
+                                     ["error" "code"])))
+    (is (= "usage" (get-in (run "--operation" "shop.order/settle" "--exclude" "[") ["error" "code"])))
+    (is (string? (get-in batch ["provenance" 0 "path"])))))
+
+(deftest collection-and-string-coverage
+  (let [root "test/fixtures/forms"
+        files (flow/source-files root)
+        report #(flow/analyze root files (str "desk.collections/" %))
+        scan (report "scan")]
+    (is (seq (uses scan ":active?" :consume)))
+    (is (seq (uses scan ":amount" :consume)))
+    (is (seq (uses scan ":value" :collect)))
+    (is (empty? (:boundaries (report "labels"))))
+    (is (empty? (:boundaries (report "remove-private"))))
+    (is (= [:unsupported-transducer] (reasons (report "opaque-transducer"))))
+    (is (re-find #"def or defonce holder"
+                 (try (report "holder") ""
+                      (catch clojure.lang.ExceptionInfo error (ex-message error)))))))

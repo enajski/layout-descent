@@ -268,9 +268,10 @@
   are left out. A scan whose literal function reads the scanned value is one site: its path goes
   on into that read. :keyed counts the keys that the code computes: each computed part of a
   vector key is one."
-  [paths]
+  ([paths] (analyze paths paths))
+  ([paths lint-paths]
   (let [root (common-root paths)
-        analysis (:analysis (kondo/run! {:lint (mapv str paths)
+        analysis (:analysis (kondo/run! {:lint (mapv str lint-paths)
                                          :cache false
                                          :skip-lint true
                                          :config {:output {:analysis {:locals true}}}}))
@@ -324,7 +325,7 @@
                  (remove #(absorbed [(:file %) (:row %) (:col %)]))
                  continue-scans
                  (filter relevant?)
-                 (mapv #(dissoc % :inner :bound :binds)))}))
+                 (mapv #(dissoc % :inner :bound :binds)))})))
 
 (def summary-defaults
   "What summarize shows without options: shapes of two or more computed levels, and no writes."

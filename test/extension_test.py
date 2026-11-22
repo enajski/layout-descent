@@ -155,6 +155,16 @@ class ExtensionTest(unittest.TestCase):
         self.assertEqual(["schema", str(ROOT / "src"), "--limit", "30", "--entity", "e2", "--sites", "3",
                           "--diagram", str(ROOT / "out/model.md")], commands[8])
 
+    def test_trace_batch_passes_repeated_flags(self):
+        batch = {"traces": [{"ok": True, "truncated": True}, {"ok": False}]}
+        with mock.patch.object(self.module, "run_cli", return_value=batch) as run:
+            self.assertIs(batch, self.descent.flow("src", ["one/a", "two/b"],
+                                                   exclude=["test/**", "dev/**"], max_steps=500))
+            run.assert_called_once_with("flow", str(ROOT / "src"),
+                                        "--operation", "one/a", "--operation", "two/b",
+                                        "--max-steps", "500", "--exclude", "test/**", "--exclude", "dev/**")
+        self.assertEqual("2 operations, 1 failed, 1 truncated", self.module._summaries("flow", batch)[1])
+
     def test_a_refusal_is_an_answer_and_a_usage_error_is_an_exception(self):
         refusal = {"ok": False, "error": {"code": "not_measured", "message": "m", "hint": "h"}}
         with mock.patch.object(self.module.subprocess, "run", return_value=finished(refusal, 1)):
@@ -229,7 +239,7 @@ class ExtensionTest(unittest.TestCase):
         self.assertEqual(["order (:id)", "ticket"], [e["name"] for e in model["entities"][:2]])
         shown = self.descent.schema.vis_meta["activity"].render(
             phase="success", args=(), kwargs={}, result=model, error=None)
-        self.assertEqual("12 entities shown, 0 hidden, 1 links, 15 functions in 1 files", shown.args[1])
+        self.assertEqual("13 entities shown, 0 hidden, 1 links, 19 functions in 2 files", shown.args[1])
 
 
 if __name__ == "__main__":

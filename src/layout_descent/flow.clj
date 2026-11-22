@@ -7,12 +7,18 @@
             [edamame.core :as edamame])
   (:import (java.nio.file Files FileVisitOption Path)))
 
-(defn source-files [dir]
-  (with-open [paths (Files/walk (.toPath (.getCanonicalFile (io/file dir)))
-                                (make-array FileVisitOption 0))]
-    (->> (iterator-seq (.iterator paths)) (map #(.toFile ^Path %))
-         (filter #(and (.isFile ^java.io.File %) (re-find #"\.clj[cs]?$" (.getName ^java.io.File %))))
-         (map str) sort vec)))
+(defn source-files
+  "Sorted Clojure files, excluding globs relative to dir (Java NIO glob syntax)."
+  ([dir] (source-files dir []))
+  ([dir excludes]
+   (let [root (.toPath (.getCanonicalFile (io/file dir)))
+         matchers (mapv #(.getPathMatcher (java.nio.file.FileSystems/getDefault) (str "glob:" %)) excludes)]
+     (with-open [paths (Files/walk root (make-array FileVisitOption 0))]
+       (->> (iterator-seq (.iterator paths))
+            (filter (fn [^Path path]
+                      (and (.isFile (.toFile path)) (re-find #"\.clj[cs]?$" (str path))
+                           (not-any? #(.matches ^java.nio.file.PathMatcher % (.relativize root path)) matchers))))
+            (map str) sort vec)))))
 
 (def ^:private reader-options
   {:all true :read-cond :allow :auto-resolve-ns true
@@ -62,18 +68,20 @@
                                     :else index)))
                           index (edamame/parse-string-all (slurp file) (assoc reader-options :features #{lang})))
                   (catch Exception _ (update index :unparsed conj path)))))
-            {:defs {} :vars {} :calls calls :lang lang :file-count (count selected) :unparsed []} selected)))
+            {:defs {} :vars {} :holders (set (vals constants)) :calls calls :lang lang :file-count (count selected) :unparsed []} selected)))
 
 ;; A value has an optional producing step, known slots, and the ids of named facts it carries.
 ;; Consuming a value starts a NEW value: dependencies remain edges, not aliases of the result.
-(def ^:private step-limit 2048)
+(def default-step-limit 2048)
 
 (defn- tracks [values] (into (sorted-set) (mapcat :tracks) values))
 
-(defn- step! [{:keys [log file op at]} form kind via values & [extra]]
+(defn- step! [{:keys [log file op at max-steps]} form kind via values & [extra]]
   (let [id (count @log)
         site (if (:row (meta form)) form at)]
-    (when (>= id step-limit) (throw (ex-info "Flow step limit" {::limit true})))
+    (when (>= id (or max-steps default-step-limit))
+      (throw (ex-info "Flow step limit"
+                      {::limit {:in (str op) :file file :row (:row (meta site)) :col (:col (meta site))}})))
     (vswap! log conj (merge {:id id :kind kind :via (str via) :in (str op) :file file
                              :row (:row (meta site)) :col (:col (meta site))
                              :inputs (mapv :id (filter :id values)) ::tracks (tracks values)} extra))
@@ -234,7 +242,12 @@
      odd? even? pos? neg? zero? nil? some? not boolean compare})
 
 (def ^:private builtins
-  (into consumers '#{get get-in assoc assoc-in update update-in deref swap! fnil conj disj}))
+  (into consumers '#{get get-in assoc assoc-in update update-in deref swap! fnil conj disj dissoc}))
+
+(def ^:private string-consumers
+  '#{clojure.string/blank? clojure.string/trim clojure.string/triml clojure.string/trimr
+     clojure.string/lower-case clojure.string/upper-case clojure.string/starts-with?
+     clojure.string/ends-with? clojure.string/includes?})
 
 (declare apply-value)
 
@@ -261,6 +274,12 @@
                   updated (apply-value ctx site q k (cons old (drop 2 args)))]
               (merge updated (step! ctx site :state-write q [m updated])))
       fnil {:wrapped m :defaults (vec (rest args))}
+      dissoc (let [keys (rest args)
+                   removed (when (every? #(contains? % :literal) keys)
+                             (mapv :literal keys))]
+               (merge (if removed (update m :slots #(apply dissoc % removed))
+                          (dissoc m :slots :closed))
+                      (step! ctx site :pass q [m] {::removed (some->> removed (mapv pr-str))})))
       (conj disj) (step! ctx site :transform q args)
       (step! ctx site :consume q args))))
 
@@ -444,7 +463,28 @@
       (= 'let core) (let-body ctx form)
       (= 'binding core) (binding-body ctx form via)
       (#{'-> '->> 'some-> 'some->>} core) (thread-body ctx form (boolean (#{'->> 'some->>} core)))
-      (builtins core) (apply-builtin ctx form q (vs))
+      (or (builtins core) (string-consumers q)) (apply-builtin ctx form q (vs))
+      (and (#{'map 'filter 'remove 'keep} core) (= 1 (count args)))
+      {:transducer core :function (ev (first args))}
+      (and (= 'into core) (= 3 (count args)))
+      (let [[target transducer source] (vs)]
+        (if-let [kind (:transducer transducer)]
+          (let [item (each ctx form via source)
+                result (apply-value ctx form via (:function transducer) [item])
+                gathered (if (#{'filter 'remove} kind)
+                           (do (step! ctx form :consume kind [result]) (same-items ctx form via source))
+                           (assoc (step! ctx form :collect via [result]) :element result :tracks (:tracks result)))
+                combined (choice ctx form via [target gathered] nil)]
+            (if (= [] (:items target))
+              (assoc combined :element (:element gathered))
+              combined))
+          (boundary! ctx form :unsupported-transducer via [target transducer source])))
+      (and (= 'reduce-kv core) (= 3 (count args)))
+      (let [[reducer initial source] (vs)
+            item (each ctx form via source)
+            entry-key (step! ctx form :transform "entry key" [source])
+            result (apply-value ctx form via reducer [initial entry-key item])]
+        (choice ctx form via [initial result] nil))
       (and (#{'map 'mapv 'keep} core) (= 2 (count args))) (map-call ctx form via (vs))
       (and (tests core) (= 2 (count args)))
       (let [[f coll] (vs)]
@@ -472,11 +512,6 @@
       (let [m (ev (first args))]
         (assemble ctx form via {:closed true}
                   (into {} (for [k (second args)] [k (put-field ctx form k (read-field ctx form m k))]))))
-      (and (= 'dissoc core) (seq args))
-      (let [[m & ks] (vs)]
-        (merge (cond-> m (:slots m) (update :slots #(apply dissoc % (keep :literal ks))))
-               (step! ctx form :pass via [m] {::removed (when (every? #(contains? % :literal) ks)
-                                                         (mapv (comp pr-str :literal) ks))})))
       (and (= 'contains? core) (= 2 (count args)))
       (let [[m k] (vs)] (step! ctx form :consume via [(read-key ctx form via m k)]))
       (and (picks core) (= 1 (count args)))
@@ -513,7 +548,7 @@
               (contains? (:dynamic ctx) q) (get (:dynamic ctx) q)
               (contains? (:unmodeled-dynamic ctx) q) (boundary! ctx form :unmodeled-dynamic-binding q [])
               (unique-target ctx q) {:fn (unique-target ctx q)}
-              (builtins (core-name q)) {:builtin q}
+              (or (builtins (core-name q)) (string-consumers q)) {:builtin q}
               (get (:vars ctx) q) (constant ctx q)
               :else (boundary! ctx form :external-value (or q form) [])))
       (seq? form) (call ctx form)
@@ -528,6 +563,20 @@
       (tagged-literal? form) (boundary! ctx form :tagged-literal (:tag form) [])
       :else {:literal form})))
 
+(defn boundary-rows
+  "Count distinct static sites from [reason via file row col] tuples."
+  [boundaries]
+  (->> (group-by first (distinct (seq boundaries)))
+       (map (fn [[reason sites]]
+              {:reason reason
+               :sites (count sites)
+               :via (->> (frequencies (map second sites))
+                         (sort-by (juxt (comp - val) key))
+                         (take 5)
+                         (mapv (fn [[via n]] {:via via :sites n})))}))
+       (sort-by (juxt (comp - :sites) (comp str :reason)))
+       vec))
+
 (defn- report [ctx dir op steps truncated?]
   (let [uses (reduce (fn [m s]
                        (reduce #(update-in %1 [%2 (:kind s)] (fnil conj []) (:id s)) m (::tracks s))) {} steps)
@@ -537,7 +586,9 @@
      :language (:lang ctx) :files (:file-count ctx) :unparsed (:unparsed ctx) :truncated truncated?
      :note "Possible source paths, not execution counts, allocation sizes or proof of safe removal."
      :fields (vec fields) :steps (mapv #(dissoc % ::introduces ::tracks ::onto ::element ::same ::shape ::removed) steps)
-     :boundaries (mapv :id (filter #(= :boundary (:kind %)) steps))}))
+     :boundary-steps (mapv :id (filter #(= :boundary (:kind %)) steps))
+     :boundaries (boundary-rows (for [step steps :when (= :boundary (:kind step))]
+                                  ((juxt :reason :via :file :row :col) step)))}))
 
 (defn index
   "The definitions and the resolved calls of a source tree in one language, for any number of
@@ -560,8 +611,8 @@
                                                           :alias true)) (range) params)]
                            (invoke ctx form target args)))
                        false
-                       (catch clojure.lang.ExceptionInfo e (if (::limit (ex-data e)) true (throw e))))]
-        {:steps @(:log ctx) :truncated limited?}))))
+                       (catch clojure.lang.ExceptionInfo e (or (::limit (ex-data e)) (throw e))))]
+        {:steps @(:log ctx) :truncated (boolean limited?) :cutoff (or limited? nil)}))))
 
 (defn templates
   "Build each fixed arity once. Named nested calls are slots in the template, not expanded bodies."
@@ -578,10 +629,29 @@
                                     (catch clojure.lang.ExceptionInfo e (if (::limit (ex-data e)) true (throw e))))]]
                [(count params) {:steps @(:log ctx) :truncated limited?}]))))
 
-(defn analyze [dir files operation & [lang]]
-  (let [op (symbol operation)
-        index (source-index dir files op lang)
-        {:keys [steps truncated]} (trace index op)]
-    (when-not steps (throw (ex-info (str "No unique top-level " (name (:lang index)) " defn for " operation ".")
-                                    {:code :flow-operation :extra {:language (:lang index) :unparsed (:unparsed index)}})))
-    (report index dir op steps truncated)))
+(defn- trace-report [index dir op]
+  (if-let [{:keys [steps truncated cutoff]} (trace index op)]
+    (cond-> (report index dir op steps truncated)
+      cutoff (assoc :cutoff cutoff))
+    (throw (ex-info (if ((:holders index) op)
+                      (str op " is a def or defonce holder, not a traceable function.")
+                      (str "No unique top-level " (name (:lang index)) " defn for " op "."))
+                    {:code :flow-operation :extra {:language (:lang index) :unparsed (:unparsed index)}}))))
+
+(defn analyze [dir files operation & [lang max-steps]]
+  (let [op (symbol operation)]
+    (trace-report (assoc (index dir files op lang) :max-steps max-steps) dir op)))
+
+(defn analyze-many
+  "Trace several operations against one index and one language; keep failures per operation."
+  [dir files operations lang max-steps]
+  (let [index (assoc (index dir files nil lang) :max-steps max-steps)]
+    {:language (:lang index) :files (:file-count index) :unparsed (:unparsed index)
+     :traces (mapv (fn [operation]
+                     (try (assoc (trace-report index dir (symbol operation)) :ok true)
+                          (catch clojure.lang.ExceptionInfo error
+                            (if (= :flow-operation (:code (ex-data error)))
+                              {:operation operation :ok false
+                               :error {:code "flow_operation" :message (ex-message error)
+                                       :hint "Choose a unique top-level defn in the batch language."}}
+                              (throw error))))) operations)}))

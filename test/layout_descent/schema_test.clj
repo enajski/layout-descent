@@ -56,10 +56,11 @@
   (let [m (model "test/fixtures/forms" {})]
     (is (= [["*"]] (map :path (:levels (entity m "orders")))) "a scanned collection is a level")
     (is (= {":mode" [1 1 0 0] ":retries" [0 1 0 0]} (counts (entity m "desk.forms/defaults"))))
-    (is (= #{:caught :opaque-call :unsupported-macro :unmodeled-dynamic-binding}
+    (is (= #{:caught :opaque-call :unsupported-macro :unmodeled-dynamic-binding
+              :indirect-call :unsupported-transducer}
            (set (map :reason (:boundaries m)))))
     (is (not (contains? m :records))))
-  (is (= 8 (count (:records (model "test/fixtures/forms" {:entity "loose"})))))
+  (is (= 9 (count (:records (model "test/fixtures/forms" {:entity "loose"})))))
   (is (= :schema-entity (try (model "test/fixtures/forms" {:entity "e99"})
                              (catch clojure.lang.ExceptionInfo e (:code (ex-data e)))))))
 
@@ -125,3 +126,12 @@
       (is (str/starts-with? (slurp mmd) "flowchart LR\n  e1["))
       (is (= 2 (count (get-in (run "--entity" "e1") [:answer "records"]))))
       (finally (doseq [f [md mmd out file dir]] (io/delete-file f true))))))
+
+(deftest entity-search-preserves-ids
+  (let [root "test/fixtures/flow"
+        all (model root {})
+        result (model root {:search "LiSTiNG" :limit 1})]
+    (is (= [(entity all "listing")] (:entities result)))
+    (is (= 4 (get-in result [:hidden :entities])))
+    (is (empty? (:links result)))
+    (is (empty? (:entities (model root {:search "not an entity"}))))))

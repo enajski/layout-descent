@@ -405,3 +405,13 @@
           value (first (filter #(= "value" (get % "pattern")) (get answer "patterns")))]
       (is (= 0.0001 (get-in answer ["objective" "ns_per_byte"])))
       (is (= 0.0004 (get value "weight"))))))
+
+(deftest facts-excludes-files-before-analysis
+  (let [root "test/fixtures/flow"
+        all (:answer (cli/run ["facts" root "--min-depth" "0"]))
+        filtered (:answer (cli/run ["facts" root "--min-depth" "0" "--exclude" "shop/**" "--exclude" "board/**"]))]
+    (is (pos? (get all "site_count")))
+    (is (= 0 (get filtered "site_count")))
+    (is (= (get all "root") (get filtered "root")))
+    (is (= ["shop/**" "board/**"] (get filtered "excludes")))
+    (is (string? (get-in filtered ["provenance" 0 "path"])))))

@@ -26,13 +26,16 @@ Treat possible writers as name-based leads, not proven ownership or a speedup.
 `descent.flow(src_dir, operation)` traces information through one operation. Its steps link origins,
 carriers and uses at source sites. It is step 2 of the loop, and it also answers a question about
 the code when there is no plan. Use the original .cljs sources; `lang="cljs"` selects that side of
-shared .cljc files. Boundaries are unknown, and static counts are not heat.
+shared .cljc files. Pass a list of operations to reuse one index in one language; inspect each
+row of `traces`. `boundaries` summarizes sites; `boundary_steps` gives exact trace step IDs.
+Boundaries are unknown, and static counts are not heat. Use `exclude=[...]` on static commands
+for directory-relative source globs, and `max_steps=` on flow/schema to adjust the trace budget.
 
 `descent.schema(src_dir)` gives the data model of a whole source tree: it traces every function and
 groups the values by their keys into entities, with the fields that one entity carries into another.
 Use it first on code you do not know, and to choose the operations for `descent.flow`.
 `entity="e3"` adds the records of one entity with their paths and sites; `diagram=file.md` writes a
-Mermaid flowchart. An entity is a group of records that share keys, not a declared type: say so,
+Mermaid flowchart. `search=` filters entity names without renumbering. An entity is a group of records that share keys, not a declared type: say so,
 and name `truncated`, `untraced` and `hidden` when they are not empty. `shapes` are source evidence,
 not declared types; `shape_contrasts` compares the same key across groups with one source example per
 shape. `name_source` explains labels.
@@ -186,9 +189,14 @@ def _summaries(command: str, result: dict[str, Any]) -> tuple[str, str, tuple[An
     if command == "discover":
         return ("Filtered membership views", f"{len(result['opportunities'])} hypotheses; ownership and runtime cost unverified", ())
     if command == "flow":
+        if "traces" in result:
+            traces = result["traces"]
+            failed = sum(not trace["ok"] for trace in traces)
+            truncated = sum(bool(trace.get("truncated")) for trace in traces)
+            return ("Information flow", f"{len(traces)} operations, {failed} failed, {truncated} truncated", ())
         return (
             f"Information flow: {result['operation']}",
-            f"{len(result['steps'])} static steps, {len(result['boundaries'])} unresolved boundaries"
+            f"{len(result['steps'])} static steps, {len(result['boundary_steps'])} unresolved boundary steps"
             + (" (truncated)" if result["truncated"] else ""),
             (),
         )
@@ -309,6 +317,11 @@ def _activity(command: str, label: str, slow: bool = False, checks: bool = False
 
 PlanPath = Annotated[str, "Path of a plan file (EDN)"]
 SavePath = Annotated[str | None, "File that also receives the answer as JSON; not a file of the plan"]
+Excludes = Annotated[list[str] | None, "Java NIO globs relative to each source directory"]
+
+
+def _repeated(flag: str, values: list[str] | None) -> list[str]:
+    return [part for value in values or () for part in (f"--{flag}", value)]
 
 
 def _save(save: str | None) -> list[str]:
@@ -325,6 +338,8 @@ class Descent:
         limit: Annotated[int, "Sites listed for each path shape; 0 gives counts only"] = 5,
         min_depth: Annotated[int, "Fewest computed levels (`?` and `*`) of a shape that is shown"] = 2,
         writes: Annotated[bool, "Also show the sites that write (assoc, update, ...)"] = False,
+        exclude: Excludes = None,
+        save: SavePath = None,
     ) -> dict[str, Any]:
         """Report where a code base reads and scans nested maps, grouped by path shape.
 
@@ -340,24 +355,31 @@ class Descent:
             "facts",
             *[_path(p) for p in paths],
             *_flags(limit=limit, min_depth=min_depth, writes="true" if writes else None),
+            *_repeated("exclude", exclude), *_save(save),
         )
 
     @vis.method(tag="observation", activity=_activity("discover", "Discover filtered views"))
-    def discover(self, src_dir: Annotated[str, "Source directory"], lang: Annotated[str | None, "clj or cljs"] = None, save: SavePath = None) -> dict[str, Any]:
+    def discover(self, src_dir: Annotated[str, "Source directory"], lang: Annotated[str | None, "clj or cljs"] = None, save: SavePath = None, exclude: Excludes = None) -> dict[str, Any]:
         """Find guarded map scans and possible maintenance sites; no plan or runtime measurement."""
-        return run_cli("discover", _path(src_dir), *_flags(lang=lang), *_save(save))
+        return run_cli("discover", _path(src_dir), *_flags(lang=lang), *_repeated("exclude", exclude), *_save(save))
 
     @vis.method(tag="observation", activity=_activity("flow", "Trace information flow"))
     def flow(
         self,
         src_dir: Annotated[str, "Source directory (.clj, .cljs or .cljc)"],
-        operation: Annotated[str, "Qualified entry function, e.g. orders/settle"],
+        operation: Annotated[str | list[str], "Qualified entry function or list of functions, e.g. orders/settle"],
         save: SavePath = None,
         lang: Annotated[str | None, "Source platform: clj or cljs. Default: infer from the entry."] = None,
+        max_steps: Annotated[int | None, "Maximum steps per operation; defaults to 2048"] = None,
+        exclude: Excludes = None,
     ) -> dict[str, Any]:
         """Follow the fields one operation produces, carries and consumes. Steps link to source;
-        field uses refer to step ids. Boundaries are unresolved; nothing measures runtime heat."""
-        return run_cli("flow", _path(src_dir), *_flags(operation=operation, lang=lang), *_save(save))
+        field uses refer to step ids. Pass several operations to share one index (one language,
+        defaulting to clj on mixed trees). A batch returns ordered `traces`, including per-operation
+        errors. Boundary summaries count static sites; `boundary_steps` holds the exact step ids."""
+        operations = [operation] if isinstance(operation, str) else operation
+        return run_cli("flow", _path(src_dir), *_repeated("operation", operations),
+                       *_flags(lang=lang, max_steps=max_steps), *_repeated("exclude", exclude), *_save(save))
 
     @vis.method(tag="observation", activity=_activity("schema", "Read data model"))
     def schema(
@@ -369,6 +391,9 @@ class Descent:
         diagram: Annotated[str | None, "File (.md or .mmd) that receives a Mermaid flowchart of the entities"] = None,
         lang: Annotated[str | None, "Source platform: clj or cljs. Default: clj on a mixed tree."] = None,
         save: SavePath = None,
+        search: Annotated[str | None, "Case-insensitive entity-name substring"] = None,
+        max_steps: Annotated[int | None, "Maximum steps per local template; defaults to 2048"] = None,
+        exclude: Excludes = None,
     ) -> dict[str, Any]:
         """The data model of a source tree: entities, the links between them and where traces stopped.
 
@@ -384,7 +409,9 @@ class Descent:
         return run_cli(
             "schema",
             _path(src_dir),
-            *_flags(lang=lang, limit=limit, entity=entity, sites=sites, diagram=_path(diagram) if diagram else None),
+            *_flags(lang=lang, limit=limit, entity=entity, sites=sites, search=search, max_steps=max_steps,
+                    diagram=_path(diagram) if diagram else None),
+            *_repeated("exclude", exclude),
             *_save(save),
         )
 
